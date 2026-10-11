@@ -178,10 +178,22 @@ messages, not here — this stays a living index, not an archive.
       `vercel_adapter.py`'s create-deployment POST now always passes
       `skipAutoDetectionConfirmation=1`, accepting Vercel's own automatic
       framework detection rather than requiring explicit settings for a
-      project that was only just created. 227 tests. **Still not yet run
-      live end-to-end** — needs the user to re-run
-      `scripts/live_feature_blast_m7.py` from their own terminal with the
-      Full-Account-scoped token now in `.env.local`.
+      project that was only just created.
+
+      **Third live run:** the full chain ran end-to-end for real —
+      `implement_exec`, `unit_verify_exec`, `deploy_exec` all passed, and
+      the deployment itself succeeded — but the independent probe got back
+      Vercel's own login page HTML instead of the app's JSON response.
+      Root cause: new Vercel projects default to Vercel Authentication (SSO
+      protection) enabled on every deployment, which returns an
+      authentication redirect to any unauthenticated request — including
+      ours. Fixed: `vercel_adapter.py`'s `deploy()` now calls
+      `PATCH /v9/projects/{name}` with `{"ssoProtection": null}` right
+      after creating the deployment, disabling protection on the project so
+      it's actually reachable without a human logging in — which is the
+      whole point of `deploy_exec` existing. 229 tests. **Still not yet
+      confirmed fully green end-to-end** — needs the user to re-run
+      `scripts/live_feature_blast_m7.py` once more from their own terminal.
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
 
 Everything past M8 (other modes, a third adapter, dashboard) is backlog —

@@ -10,6 +10,7 @@ import httpx
 
 VERCEL_API_BASE_URL = "https://api.vercel.com"
 VERCEL_DEPLOYMENTS_URL = f"{VERCEL_API_BASE_URL}/v13/deployments"
+VERCEL_PROJECTS_URL = f"{VERCEL_API_BASE_URL}/v9/projects"
 VERCEL_TOKEN_ENV_VAR = "VERCEL_TOKEN"
 
 # `readyState` values that mean the deployment has finished, one way or
@@ -184,6 +185,14 @@ class VercelDeployAdapter:
                 return str(message)
         return raw_text
 
+    def _disable_deployment_protection(self, project_name: str, headers: dict[str, str]) -> None:
+        response = self._http_client.patch(
+            f"{VERCEL_PROJECTS_URL}/{project_name}",
+            json={"ssoProtection": None},
+            headers=headers,
+        )
+        self._raise_for_status(response)
+
     def deploy(
         self,
         *,
@@ -212,6 +221,15 @@ class VercelDeployAdapter:
             params={"skipAutoDetectionConfirmation": "1"},
         )
         self._raise_for_status(create_response)
+
+        # New projects default to Vercel Authentication (SSO) protection on
+        # every deployment, which would otherwise return an HTML login page
+        # instead of the app's actual response to any unauthenticated
+        # request — including ours when we poll/probe it right after. This
+        # adapter's whole purpose is deploying something reachable without
+        # a human logging in, so disabling it is part of what "deploy"
+        # means here, not an optional extra step.
+        self._disable_deployment_protection(project_name, headers)
 
         current_payload = create_response.json()
         deployment_id = current_payload["id"]

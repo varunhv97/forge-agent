@@ -41,12 +41,19 @@ def _make_adapter(handler, **kwargs) -> tuple[VercelDeployAdapter, _FakeSleep]:
 
 
 def test_successful_deploy_polls_until_ready():
-    call_count = {"n": 0}
+    poll_count = {"n": 0}
     ready_states = ["QUEUED", "BUILDING", "READY"]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        call_count["n"] += 1
-        index = min(call_count["n"] - 1, len(ready_states) - 1)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"id": "dpl_123", "url": "my-app.vercel.app", "readyState": ready_states[0]},
+            )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={})
+        poll_count["n"] += 1
+        index = min(poll_count["n"], len(ready_states) - 1)
         return httpx.Response(
             200,
             json={"id": "dpl_123", "url": "my-app.vercel.app", "readyState": ready_states[index]},
@@ -62,8 +69,8 @@ def test_successful_deploy_polls_until_ready():
     assert result.deployment_id == "dpl_123"
     assert result.url == "my-app.vercel.app"
     assert result.ready_state == "READY"
-    # 1 create call + 2 poll calls (BUILDING, then READY).
-    assert call_count["n"] == 3
+    # 2 poll calls (BUILDING, then READY) after the create+disable-protection calls.
+    assert poll_count["n"] == 2
     assert fake_sleep.calls == [1.0, 1.0]
 
 
@@ -158,6 +165,8 @@ def test_error_ready_state_raises_deployment_failed_error():
                     "error": {"message": "build failed: missing package.json"},
                 },
             )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={})
         raise AssertionError("no poll call expected when create response is already ERROR")
 
     adapter, _ = _make_adapter(handler)
@@ -212,9 +221,9 @@ def test_create_request_body_shape():
     ]
     adapter.deploy(project_name="my-app", files=files, target="production")
 
-    assert len(captured_requests) == 1
-    request = captured_requests[0]
-    assert request.method == "POST"
+    create_requests = [r for r in captured_requests if r.method == "POST"]
+    assert len(create_requests) == 1
+    request = create_requests[0]
     assert request.url == httpx.URL(
         "https://api.vercel.com/v13/deployments?skipAutoDetectionConfirmation=1"
     )
@@ -239,6 +248,8 @@ def test_poll_request_uses_deployment_id_and_bearer_auth():
             return httpx.Response(
                 200, json={"id": "dpl_poll", "url": "my-app.vercel.app", "readyState": "BUILDING"}
             )
+        if request.method == "PATCH":
+            return httpx.Response(200, json={})
         captured_poll_requests.append(request)
         return httpx.Response(
             200, json={"id": "dpl_poll", "url": "my-app.vercel.app", "readyState": "READY"}
@@ -255,6 +266,52 @@ def test_poll_request_uses_deployment_id_and_bearer_auth():
     assert poll_request.method == "GET"
     assert poll_request.url == httpx.URL("https://api.vercel.com/v13/deployments/dpl_poll")
     assert poll_request.headers["authorization"] == "Bearer fake-token"
+
+
+def test_disable_deployment_protection_sends_correct_patch_request():
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"id": "dpl_prot", "url": "my-app.vercel.app", "readyState": "READY"}
+            )
+        return httpx.Response(200, json={})
+
+    adapter, _ = _make_adapter(handler)
+    adapter.deploy(
+        project_name="my-app",
+        files=[DeploymentFile(path="index.html", content="<h1>hi</h1>")],
+    )
+
+    patch_requests = [r for r in captured_requests if r.method == "PATCH"]
+    assert len(patch_requests) == 1
+    request = patch_requests[0]
+    assert request.url == httpx.URL("https://api.vercel.com/v9/projects/my-app")
+    assert request.headers["authorization"] == "Bearer fake-token"
+    assert json.loads(request.content) == {"ssoProtection": None}
+
+
+def test_disable_deployment_protection_failure_raises_before_polling():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"id": "dpl_prot", "url": "my-app.vercel.app", "readyState": "BUILDING"}
+            )
+        if request.method == "PATCH":
+            return httpx.Response(500, text="internal error")
+        raise AssertionError("no poll call expected when disabling protection already failed")
+
+    adapter, _ = _make_adapter(handler)
+
+    with pytest.raises(VercelAPIError) as exc_info:
+        adapter.deploy(
+            project_name="my-app",
+            files=[DeploymentFile(path="index.html", content="<h1>hi</h1>")],
+        )
+
+    assert exc_info.value.status_code == 500
 
 
 def test_adapter_only_closes_http_client_it_owns():

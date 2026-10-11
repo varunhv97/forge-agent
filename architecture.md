@@ -93,7 +93,15 @@ forge/
                   on file. The Vercel token itself must be Full-Account
                   scoped, not Team/Project scoped — a narrower scope can't
                   create new projects and Vercel rejects it as
-                  invalidToken, which VercelAuthenticationError surfaces
+                  invalidToken, which VercelAuthenticationError surfaces.
+                  deploy() also PATCHes the new project right after
+                  creating it (ssoProtection: null) — new Vercel projects
+                  default to Vercel Authentication on every deployment,
+                  which would otherwise return a login-page redirect to
+                  any unauthenticated request instead of the app's actual
+                  response, defeating the point of deploying something
+                  Forge itself (or a human without a Vercel login) can
+                  reach
   isolation/
     worktree_manager.py  create_worktree/remove_worktree over real git
                           worktrees, idempotent cleanup
