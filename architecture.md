@@ -83,7 +83,17 @@ forge/
     deploy/       vercel_adapter.py — VercelDeployAdapter: creates a
                   deployment via the Vercel REST API and polls it to a
                   terminal readyState (READY/ERROR), real httpx.Client,
-                  fully offline-tested via httpx.MockTransport
+                  fully offline-tested via httpx.MockTransport. Every
+                  create-deployment call passes
+                  skipAutoDetectionConfirmation=1, since deploy_exec always
+                  deploys a fresh, disposable project name — every
+                  deployment is that project's first, and Vercel requires
+                  either that flag or an explicit projectSettings object
+                  for a project with no prior framework-detection answer
+                  on file. The Vercel token itself must be Full-Account
+                  scoped, not Team/Project scoped — a narrower scope can't
+                  create new projects and Vercel rejects it as
+                  invalidToken, which VercelAuthenticationError surfaces
   isolation/
     worktree_manager.py  create_worktree/remove_worktree over real git
                           worktrees, idempotent cleanup

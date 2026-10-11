@@ -164,11 +164,24 @@ messages, not here — this stays a living index, not an archive.
       gained `VercelCredentialError` (base for `MissingVercelTokenError`
       and the new `VercelAuthenticationError`, raised for a 401/403 from
       either the create or poll call) so `deploy_exec` can distinguish "the
-      token itself is rejected" from an ordinary `VercelAPIError`. 227
-      tests. **Still not yet run live end-to-end** — needs the user to
-      regenerate/re-verify `VERCEL_TOKEN` in `.env.local` and re-run
-      `scripts/live_feature_blast_m7.py` from their own terminal (same
-      `claude` CLI authentication restriction as `live_smoke_test.py`).
+      token itself is rejected" from an ordinary `VercelAPIError`.
+
+      **Second live run attempt:** a Team/Project-scoped Vercel token
+      caused the 403 above — root-caused via the exact Vercel error shape
+      (`invalidToken: true`), fixed by the user regenerating a
+      **Full Account**-scoped token. Past that, `deploy_exec` then failed
+      with a real, different Vercel API error: `400 missing_project_settings`
+      — Vercel requires either a `projectSettings` object or the
+      `skipAutoDetectionConfirmation=1` query parameter on a brand-new
+      project's first deployment (every deploy_exec deployment is a fresh,
+      disposable project, so it's always a first deployment). Fixed:
+      `vercel_adapter.py`'s create-deployment POST now always passes
+      `skipAutoDetectionConfirmation=1`, accepting Vercel's own automatic
+      framework detection rather than requiring explicit settings for a
+      project that was only just created. 227 tests. **Still not yet run
+      live end-to-end** — needs the user to re-run
+      `scripts/live_feature_blast_m7.py` from their own terminal with the
+      Full-Account-scoped token now in `.env.local`.
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
 
 Everything past M8 (other modes, a third adapter, dashboard) is backlog —

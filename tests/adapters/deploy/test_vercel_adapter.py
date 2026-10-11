@@ -215,7 +215,9 @@ def test_create_request_body_shape():
     assert len(captured_requests) == 1
     request = captured_requests[0]
     assert request.method == "POST"
-    assert request.url == httpx.URL("https://api.vercel.com/v13/deployments")
+    assert request.url == httpx.URL(
+        "https://api.vercel.com/v13/deployments?skipAutoDetectionConfirmation=1"
+    )
     assert request.headers["authorization"] == "Bearer fake-token"
 
     body = json.loads(request.content)

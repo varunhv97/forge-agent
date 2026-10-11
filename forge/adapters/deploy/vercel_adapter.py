@@ -198,7 +198,19 @@ class VercelDeployAdapter:
         }
 
         body = self._build_request_body(project_name=project_name, files=files, target=target)
-        create_response = self._http_client.post(VERCEL_DEPLOYMENTS_URL, json=body, headers=headers)
+        # Required for a brand-new project's first deployment: without it,
+        # Vercel rejects the request with `missing_project_settings` since
+        # it has no prior framework-detection answer on file for a project
+        # that doesn't exist yet. This adapter always deploys a fresh,
+        # disposable project name (see deploy_exec.py), so this is always
+        # the first deployment for that project — accepting Vercel's own
+        # automatic framework detection is the right default every time.
+        create_response = self._http_client.post(
+            VERCEL_DEPLOYMENTS_URL,
+            json=body,
+            headers=headers,
+            params={"skipAutoDetectionConfirmation": "1"},
+        )
         self._raise_for_status(create_response)
 
         current_payload = create_response.json()
