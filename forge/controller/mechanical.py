@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from pydantic import BaseModel
 
@@ -12,6 +12,14 @@ from forge.models.graph import TaskSpec
 class MechanicalResult(BaseModel):
     passed: bool
     summary: str = ""
+    # Structured output for a mechanical node whose node type declares a
+    # real output_schema beyond the empty placeholder (e.g. deploy_exec's
+    # deployment URL) — mirrors how EXECUTION dispatch populates
+    # Attempt.outputs, so a downstream node's build_input can consume a
+    # mechanical upstream's result the same way it consumes an EXECUTION
+    # one. Most mechanical runners (pytest, lint) have nothing structured
+    # to report and leave this empty.
+    outputs: Dict[str, Any] = {}
 
 
 @dataclass

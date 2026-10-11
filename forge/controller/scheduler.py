@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Union
+
+from pydantic import ValidationError
 
 from forge.controller.attempt_commit import (
     GitStateError,
@@ -22,7 +25,7 @@ from forge.controller.decisions import RejectedProposalError, apply_decision
 from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunner
 from forge.controller.mechanical import MechanicalContext, MechanicalRunnerRegistry
 from forge.controller.model_registry import ModelRegistry
-from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
+from forge.controller.node_registry import NodeType, NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.store import Store
 from forge.isolation.worktree_manager import create_worktree
 from forge.models.attempt import Attempt, AttemptStatus
@@ -298,6 +301,7 @@ def dispatch_mechanical_attempt(
     attempt.status = AttemptStatus.PASSED if result.passed else AttemptStatus.FAILED
     attempt.finished_at = _now()
     attempt.failure_summary = None if result.passed else result.summary
+    attempt.outputs = result.outputs
 
     commit_sha = current_head(worktree_path) if worktree_path else ""
     evidence = [
@@ -359,6 +363,40 @@ def _collect_upstream_outputs(
         except Exception:
             continue
     return outputs
+
+
+_RESULT_FILE_NAME = ".forge_result.json"
+
+
+def _read_result_file(
+    worktree_path: str, node_type: NodeType, fallback_summary: str
+) -> tuple[bool, str, Dict[str, object]]:
+    """
+    For `output_strategy == "result_file"` node types: reads and validates
+    `.forge_result.json` from the worktree rather than trusting anything
+    said in the session's own transcript. The node type's own
+    `output_schema` is expected to declare a `passed: bool` field for this
+    strategy — that's the contract a result-file node type opts into by
+    choosing this strategy. Any failure to find, parse, or validate the
+    file is treated as the attempt failing, with a summary explaining why,
+    never as a silent default pass.
+    """
+    result_path = Path(worktree_path) / _RESULT_FILE_NAME
+    if not result_path.exists():
+        return False, f"{_RESULT_FILE_NAME} was not written", {}
+    try:
+        raw = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"failed to read {_RESULT_FILE_NAME}: {exc}", {}
+    try:
+        validated = node_type.output_schema.model_validate(raw)
+    except ValidationError as exc:
+        return False, f"{_RESULT_FILE_NAME} didn't match the expected shape: {exc}", {}
+
+    output_dict = validated.model_dump()
+    passed = bool(output_dict.get("passed", False))
+    summary = str(output_dict.get("reasoning") or output_dict.get("summary") or fallback_summary)
+    return passed, summary, output_dict
 
 
 def dispatch_execution_attempt(
@@ -431,6 +469,8 @@ def dispatch_execution_attempt(
     passed = False
     summary = outcome.summary
     output_dict: Dict[str, object] = {}
+    result_commit: Optional[str] = None
+    changed_paths: list[str] = []
 
     if outcome.completed:
         try:
@@ -445,22 +485,28 @@ def dispatch_execution_attempt(
                 if summary
                 else "no changes were committed"
             )
+            result_commit = None
         else:
             changed_paths = changed_paths_between(
                 worktree.worktree_path, base_commit, result_commit
             )
-            output_dict = {
-                "result_commit": result_commit,
-                "changed_paths": changed_paths,
-                "summary": summary,
-            }
-            passed = True
+            if node_type.output_strategy == "result_file":
+                passed, summary, output_dict = _read_result_file(
+                    worktree.worktree_path, node_type, summary
+                )
+            else:
+                output_dict = {
+                    "result_commit": result_commit,
+                    "changed_paths": changed_paths,
+                    "summary": summary,
+                }
+                passed = True
 
     attempt.status = AttemptStatus.PASSED if passed else AttemptStatus.FAILED
     attempt.finished_at = _now()
     attempt.failure_summary = None if passed else summary
     attempt.outputs = output_dict
-    attempt.result_commit = output_dict.get("result_commit")
+    attempt.result_commit = result_commit
 
     evidence = [
         Evidence(
@@ -471,8 +517,8 @@ def dispatch_execution_attempt(
             acceptance_criterion_id=criterion_id,
             kind="test_result",
             passed=passed,
-            commit_sha=output_dict.get("result_commit", base_commit),
-            touched_paths=output_dict.get("changed_paths", []),
+            commit_sha=result_commit or base_commit,
+            touched_paths=changed_paths,
             raw_artifact_id=attempt.id,
             created_at=_now(),
         )

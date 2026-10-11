@@ -115,7 +115,38 @@ messages, not here — this stays a living index, not an archive.
       `integration_verify_exec` are real and registered but not yet
       exercised end-to-end. Codex adapter choice deferred too (SDK-only
       for now, per discussion).
-- [ ] **M7** — Feature Blast end-to-end with a real Vercel deployment (flagship milestone)
+- [ ] **M7 — Feature Blast end-to-end with a real Vercel deployment (in progress).**
+      Descoped first slice, user-approved: a single deterministic chain
+      (`implement_exec → unit_verify_exec → deploy_exec → manual_test_exec`),
+      no LLM-driven `plan_decision` yet. Built so far:
+      `forge/adapters/deploy/vercel_adapter.py` (`VercelDeployAdapter` —
+      create + poll the Vercel REST API, built via parallel subagent, fully
+      offline-tested via `httpx.MockTransport`). `forge/nodes/deploy_exec.py`
+      (mine — MECHANICAL, collects every text file out of the upstream
+      worktree and deploys it). `NodeType.output_strategy` (mine — new
+      field, `"commit_diff"` default vs. `"result_file"`) plus
+      `scheduler.py`'s `_read_result_file`, needed because
+      `manual_test_exec`'s pass/fail is a judgment call with no git diff to
+      derive it from — it now writes `.forge_result.json` in its worktree
+      and the dispatcher reads/validates that instead of trusting the
+      session's transcript. `manual_test_exec` and `deploy_exec` now both
+      registered for real in `forge/nodes/__init__.py::register_all`
+      (`deploy_default` permission profile, network-allowed;
+      `_manual_test_build_input` bridges the dispatcher's generic
+      `upstream_outputs` shape to `manual_test_exec`'s `target_base_url`
+      param by reading the upstream `deploy_exec` output).
+      `forge/modes/feature_blast.py::build_feature_blast_request_and_graph`
+      — builds the `Request`+draft `GraphVersion` for the slice above,
+      run through the same `compile_and_validate` as any other graph.
+      `scripts/live_feature_blast_m7.py` — the live verification script
+      (same pattern as `scripts/live_smoke_test.py`), scaffolds a throwaway
+      Vercel-Python toy app, asks `implement_exec` to add a new
+      `api/greet.py` endpoint, deploys it for real, and independently
+      curls the live deployed URL rather than trusting the run's own
+      `COMPLETED_VERIFIED`. 221 tests. **Not yet run live** — needs the
+      user to run it from their own terminal (same `claude` CLI
+      authentication restriction as `live_smoke_test.py`) with a real
+      `VERCEL_TOKEN` in `.env.local`.
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
 
 Everything past M8 (other modes, a third adapter, dashboard) is backlog —

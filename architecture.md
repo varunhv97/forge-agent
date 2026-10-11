@@ -53,9 +53,20 @@ forge/
                           either kind get driven through a decision each
                           tick instead of staying failed forever
   nodes/          implement_exec, integration_test_write_exec,
-                  manual_test_exec (EXECUTION); unit_verify_exec,
-                  integration_verify_exec (MECHANICAL, worktree-aware);
-                  register_all() populates every registry at once
+                  manual_test_exec (EXECUTION, output_strategy=
+                  "result_file" — writes .forge_result.json, no git diff to
+                  judge pass/fail from); unit_verify_exec,
+                  integration_verify_exec, deploy_exec (MECHANICAL,
+                  worktree-aware; deploy_exec reaches the real network);
+                  register_all() populates every registry at once,
+                  including deploy_exec's runner (make_deploy_runner) and
+                  manual_test_exec's build_input adapter
+                  (_manual_test_build_input, resolves target_base_url from
+                  the upstream deploy_exec output)
+  modes/          feature_blast.py — build_feature_blast_request_and_graph,
+                  the descoped M7 slice's Request+draft GraphVersion
+                  builder; the caller still runs the draft through
+                  compile_and_validate itself, same as any other graph
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,
@@ -69,7 +80,10 @@ forge/
                   lifecycle — stop always runs, even on failure)
     decision/     anthropic_api_decision_adapter.py — direct Anthropic
                   Messages API calls with forced tool-use structured output
-    deploy/       deploy_adapter_base.py, vercel_adapter.py       (not yet — M7)
+    deploy/       vercel_adapter.py — VercelDeployAdapter: creates a
+                  deployment via the Vercel REST API and polls it to a
+                  terminal readyState (READY/ERROR), real httpx.Client,
+                  fully offline-tested via httpx.MockTransport
   isolation/
     worktree_manager.py  create_worktree/remove_worktree over real git
                           worktrees, idempotent cleanup
@@ -138,6 +152,35 @@ starting over.
   container is supplied; there is no configuration path around this.
   `run_codex_in_sandbox` owns the full lifecycle and guarantees
   `stop_container` runs even when the attempt itself fails.
+
+## M7 descoped slice, concretely
+
+`forge/modes/feature_blast.py` builds one deterministic chain —
+`implement_exec → unit_verify_exec → deploy_exec → manual_test_exec` — with
+no LLM-driven `plan_decision` step yet; the shape itself is fixed by that
+function, not proposed. `deploy_exec` is `MECHANICAL`: it reads every text
+file out of its upstream worktree (inherited through the same
+worktree-reuse chain `unit_verify_exec` already uses) and calls
+`VercelDeployAdapter.deploy()` for real. `manual_test_exec` then needs a
+live URL to test against that it can't derive itself —
+`_manual_test_build_input` (in `forge/nodes/__init__.py`) bridges this by
+pulling `deployment_url` off the upstream `deploy_exec` output before
+calling `manual_test_exec.build_input`.
+
+`manual_test_exec`'s pass/fail is a judgment call, not something a git diff
+can express — this is why `NodeType` gained `output_strategy`
+(`"commit_diff"` default vs. `"result_file"`). A `"result_file"` node
+writes `.forge_result.json` into its own worktree before finishing;
+`dispatch_execution_attempt` reads and validates that file against the
+node's `output_schema` instead of deriving output from the commit diff,
+still never trusting anything said in the session's own transcript.
+
+`scripts/live_feature_blast_m7.py` is the live verification entry point
+(same pattern as `live_smoke_test.py`): scaffolds a throwaway Vercel-Python
+toy app, runs the full chain against a real `claude` CLI session and a
+real Vercel deployment, then independently curls the live URL itself
+rather than trusting the run's own `COMPLETED_VERIFIED` — not yet run live,
+same `claude` CLI authentication restriction as `live_smoke_test.py`.
 
 **Known gaps:** `scripts/live_smoke_test.py` has now been run successfully
 by the user with real credentials (a basic `implement_exec` →

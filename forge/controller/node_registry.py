@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Type
+from typing import Literal, Type
 
 from pydantic import BaseModel, ConfigDict
 
@@ -29,6 +29,19 @@ class NodeType(BaseModel):
     produces_gate_evidence: bool = False
     default_model: str | None = None
     escalation_model: str | None = None
+    # How an EXECUTION node's structured output gets derived after its
+    # session ends. "commit_diff" (the default): the dispatcher builds
+    # {result_commit, changed_paths, summary} mechanically from git — for
+    # nodes whose job is literally to change code (implement_exec,
+    # integration_test_write_exec). "result_file": the node writes its own
+    # verdict to a fixed file in its worktree (.forge_result.json), which
+    # the dispatcher reads and validates against output_schema — for a
+    # judgment node like manual_test_exec, where there's no git diff that
+    # could mean "passed" or "failed," only the node's own first-person
+    # report of what it observed. Either way the dispatcher derives the
+    # output from something concrete left behind in the worktree, never
+    # from parsing free text out of the session's own transcript.
+    output_strategy: Literal["commit_diff", "result_file"] = "commit_diff"
 
 
 class UnknownNodeTypeError(KeyError):

@@ -94,6 +94,14 @@ def build_prompt(input: ManualTestInput) -> str:
         "state a verdict. If the journey fails or looks wrong, say so and "
         "explain what you saw instead of what you expected."
     )
+    lines.append("")
+    lines.append(
+        "When you are done, write your verdict to a file named "
+        "`.forge_result.json` in the current directory, containing exactly "
+        'this shape: {"passed": true or false, "reasoning": "...", '
+        '"screenshot_paths": ["..."]}. This file, not anything you say in '
+        "conversation, is what actually gets read as your result."
+    )
     return "\n".join(lines)
 
 
@@ -106,4 +114,5 @@ MANUAL_TEST_EXEC = NodeType(
     produces_gate_evidence=True,
     default_model="claude-sonnet-5",
     escalation_model="claude-opus-5",
+    output_strategy="result_file",
 )

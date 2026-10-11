@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from typing import Optional
 
+from pydantic import BaseModel
+
+from forge.adapters.deploy.vercel_adapter import VercelDeployAdapter
 from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionNodeHandlers
 from forge.controller.mechanical import MechanicalRunnerRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
+from forge.models.graph import TaskSpec
 from forge.models.permissions import PermissionProfile
+from forge.models.request import Request
 from forge.nodes import implement_exec as implement_exec_module
 from forge.nodes import integration_test_write_exec as integration_test_write_exec_module
+from forge.nodes import manual_test_exec as manual_test_exec_module
+from forge.nodes.deploy_exec import DEPLOY_EXEC, DeployExecOutput, make_deploy_runner
 from forge.nodes.implement_exec import IMPLEMENT_EXEC
 from forge.nodes.integration_test_write_exec import INTEGRATION_TEST_WRITE_EXEC
 from forge.nodes.integration_verify_exec import (
@@ -46,12 +53,49 @@ MANUAL_TEST_DEFAULT = PermissionProfile(
 # consult most of its fields.
 MECHANICAL_DEFAULT = PermissionProfile(name="mechanical_default", allowed_tools=[])
 
+# deploy_exec is mechanical like unit_verify_exec/integration_verify_exec —
+# no LLM, no hook-enforced tool boundary — but it is the first mechanical
+# node that actually reaches the network (the Vercel API), so it needs its
+# own profile with network_allowed=True rather than reusing
+# MECHANICAL_DEFAULT.
+DEPLOY_DEFAULT = PermissionProfile(
+    name="deploy_default", allowed_tools=[], network_allowed=True
+)
+
+
+def _manual_test_build_input(
+    task: TaskSpec, request: Request, upstream_outputs: dict[str, BaseModel]
+) -> manual_test_exec_module.ManualTestInput:
+    """
+    Bridges the dispatcher's generic `(task, request, upstream_outputs)`
+    shape to `manual_test_exec.build_input`'s `target_base_url` parameter.
+
+    `target_base_url` is not something manual_test_exec can derive for
+    itself — it comes from whichever upstream task actually deployed the
+    thing being tested. This looks for exactly one upstream `deploy_exec`
+    output and takes its `deployment_url`; anything else (no deploy
+    upstream, or an output that doesn't parse as `DeployExecOutput`) is a
+    graph-construction bug, not a runtime condition to recover from, so it
+    fails loudly rather than silently testing against an empty URL.
+    """
+    deploy_outputs = [
+        output for output in upstream_outputs.values() if isinstance(output, DeployExecOutput)
+    ]
+    if len(deploy_outputs) != 1:
+        raise ValueError(
+            f"manual_test_exec task '{task.id}' needs exactly one upstream "
+            f"deploy_exec output, found {len(deploy_outputs)}"
+        )
+    target_base_url = f"https://{deploy_outputs[0].deployment_url}"
+    return manual_test_exec_module.build_input(task, request, target_base_url)
+
 
 def register_all(
     node_registry: NodeTypeRegistry,
     permission_registry: PermissionProfileRegistry,
     mechanical_registry: Optional[MechanicalRunnerRegistry] = None,
     execution_handler_registry: Optional[ExecutionHandlerRegistry] = None,
+    deploy_adapter: Optional[VercelDeployAdapter] = None,
 ) -> None:
     """
     Register every node type and permission profile defined in this package
@@ -64,20 +108,33 @@ def register_all(
     just the first two registries. Dispatching anything for real needs all
     four, since that's where the actual runner callables and
     input/prompt-builder functions get wired in.
+
+    `deploy_adapter` lets a caller inject a configured `VercelDeployAdapter`
+    (e.g. one built from a real token for a live run); when omitted and
+    `mechanical_registry` is given, a default adapter is constructed here.
+    Constructing one is side-effect-free — it only resolves its token and
+    touches the network inside `.deploy()`, never in `__init__` — so this
+    default is safe even for callers (like the test suite) that never
+    actually dispatch a deploy_exec attempt.
     """
     permission_registry.register(CODE_EDIT_DEFAULT)
     permission_registry.register(MANUAL_TEST_DEFAULT)
     permission_registry.register(MECHANICAL_DEFAULT)
+    permission_registry.register(DEPLOY_DEFAULT)
 
     node_registry.register(IMPLEMENT_EXEC)
     node_registry.register(INTEGRATION_TEST_WRITE_EXEC)
     node_registry.register(MANUAL_TEST_EXEC)
     node_registry.register(UNIT_VERIFY_EXEC)
     node_registry.register(INTEGRATION_VERIFY_EXEC)
+    node_registry.register(DEPLOY_EXEC)
 
     if mechanical_registry is not None:
         mechanical_registry.register("unit_verify_exec", UNIT_VERIFY_EXEC_RUNNER)
         mechanical_registry.register("integration_verify_exec", INTEGRATION_VERIFY_EXEC_RUNNER)
+        mechanical_registry.register(
+            "deploy_exec", make_deploy_runner(deploy_adapter or VercelDeployAdapter())
+        )
 
     if execution_handler_registry is not None:
         execution_handler_registry.register(
@@ -94,8 +151,10 @@ def register_all(
                 build_prompt=integration_test_write_exec_module.build_prompt,
             ),
         )
-        # manual_test_exec is intentionally not registered here yet: its
-        # build_input needs a deployed/preview URL supplied by whatever
-        # deploy step precedes it, which doesn't exist until that mode's
-        # graph (Feature Blast) is actually built. Its NodeType is real and
-        # registered above; only its live dispatch wiring is deferred.
+        execution_handler_registry.register(
+            "manual_test_exec",
+            ExecutionNodeHandlers(
+                build_input=_manual_test_build_input,
+                build_prompt=manual_test_exec_module.build_prompt,
+            ),
+        )
