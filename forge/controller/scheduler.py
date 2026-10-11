@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Dict, Optional
 
+from forge.controller.decision_dispatch import (
+    DEFAULT_FALLBACK_POLICIES,
+    DecisionFn,
+    FallbackFn,
+    invoke_decision_node,
+)
+from forge.controller.decisions import RejectedProposalError, apply_decision
 from forge.controller.mechanical import MechanicalRunnerRegistry
+from forge.controller.model_registry import ModelRegistry
+from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.store import Store
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.common import NodeKind
@@ -12,6 +23,32 @@ from forge.models.graph import GraphVersion, TaskSpec
 from forge.models.request import Request
 from forge.models.run import Run, RunStatus
 from forge.models.trace import TraceEvent
+
+# A safety cap on how many decision rounds a single controller_tick will
+# drive a run's currently-failing tasks through, independent of any single
+# task's own retry budget. Guards against a configuration bug (e.g. several
+# tasks each with a large budget) turning one tick into an unbounded loop.
+MAX_DECISION_ROUNDS_PER_TICK = 50
+
+
+@dataclass
+class ControllerDependencies:
+    """
+    Everything controller_tick needs beyond the store itself, bundled so
+    the function signature doesn't grow a new parameter every time a new
+    kind of node or decision gets wired in.
+    """
+
+    mechanical_registry: MechanicalRunnerRegistry
+    node_registry: NodeTypeRegistry = field(default_factory=NodeTypeRegistry)
+    permission_registry: PermissionProfileRegistry = field(
+        default_factory=PermissionProfileRegistry
+    )
+    model_registry: ModelRegistry = field(default_factory=lambda: ModelRegistry([]))
+    decision_fn: Optional[DecisionFn] = None
+    fallback_policies: Dict[str, FallbackFn] = field(
+        default_factory=lambda: dict(DEFAULT_FALLBACK_POLICIES)
+    )
 
 
 def new_id(prefix: str) -> str:
@@ -82,10 +119,10 @@ def _ready_tasks(graph: GraphVersion, attempts: list[Attempt]) -> list[TaskSpec]
         if any(a.status in (AttemptStatus.RUNNING, AttemptStatus.PASSED) for a in existing):
             continue
         if any(a.status == AttemptStatus.FAILED for a in existing):
-            # No decision layer exists yet to judge whether a retry carries
-            # genuinely new information. A failed mechanical task simply
-            # stays failed until that machinery exists — never silently
-            # re-dispatched.
+            # A failed task is never silently re-dispatched by this generic
+            # readiness check — the only path back to running is an
+            # explicit RETRY_WITH_FEEDBACK/ESCALATE_MODEL decision, handled
+            # separately in _resolve_failed_tasks.
             continue
         if all(
             any(a.task_id == dep and a.status == AttemptStatus.PASSED for a in attempts)
@@ -95,10 +132,40 @@ def _ready_tasks(graph: GraphVersion, attempts: list[Attempt]) -> list[TaskSpec]
     return ready
 
 
-def _has_unrecoverable_failure(graph: GraphVersion, attempts: list[Attempt]) -> bool:
+def _latest_attempt_per_task(attempts: list[Attempt]) -> dict[str, Attempt]:
+    latest: dict[str, Attempt] = {}
+    for a in attempts:
+        current = latest.get(a.task_id)
+        if current is None or a.attempt_number > current.attempt_number:
+            latest[a.task_id] = a
+    return latest
+
+
+def _failed_tasks_needing_decision(
+    graph: GraphVersion, attempts: list[Attempt]
+) -> list[tuple[TaskSpec, Attempt]]:
     task_by_id = {t.id: t for t in graph.tasks}
-    failed_task_ids = {a.task_id for a in attempts if a.status == AttemptStatus.FAILED}
-    return any(task_by_id[tid].required for tid in failed_task_ids if tid in task_by_id)
+    result: list[tuple[TaskSpec, Attempt]] = []
+    for task_id, attempt in _latest_attempt_per_task(attempts).items():
+        if attempt.status == AttemptStatus.FAILED and task_id in task_by_id:
+            result.append((task_by_id[task_id], attempt))
+    return result
+
+
+def _has_unrecoverable_failure(graph: GraphVersion, attempts: list[Attempt]) -> bool:
+    """
+    True iff some required task's *latest* attempt is FAILED — not merely
+    "has ever failed." Attempt history is append-only, so a task that
+    failed once and then succeeded on retry still has an old FAILED row;
+    only the most recent attempt tells you whether it's actually stuck.
+    """
+    task_by_id = {t.id: t for t in graph.tasks}
+    latest = _latest_attempt_per_task(attempts)
+    return any(
+        task_by_id[task_id].required
+        for task_id, attempt in latest.items()
+        if attempt.status == AttemptStatus.FAILED and task_id in task_by_id
+    )
 
 
 def all_required_gates_met(
@@ -134,20 +201,32 @@ def all_required_gates_met(
     return True
 
 
-def _dispatch_mechanical(
+def dispatch_mechanical_attempt(
     task: TaskSpec,
     run: Run,
     attempt_number: int,
     store: Store,
     mechanical_registry: MechanicalRunnerRegistry,
+    *,
+    model_used: str = "mechanical",
+    retries_from_attempt_id: Optional[str] = None,
+    escalated_from_attempt_id: Optional[str] = None,
 ) -> Attempt:
+    """
+    Creates and synchronously runs one attempt for `task`. Used both by the
+    normal dependency-driven readiness loop (a fresh task, no retry/escalate
+    lineage) and by decision handling (a forward-pointing retry/escalation
+    attempt) — the only difference is the optional lineage/model fields.
+    """
     attempt = Attempt(
         id=new_id("att"),
         run_id=run.id,
         task_id=task.id,
         graph_version_id=run.active_graph_version_id,
         attempt_number=attempt_number,
-        model_used="mechanical",
+        retries_from_attempt_id=retries_from_attempt_id,
+        escalated_from_attempt_id=escalated_from_attempt_id,
+        model_used=model_used,
         permission_profile=task.permission_profile,
         worktree_path="",
         branch_name="",
@@ -200,16 +279,115 @@ def _dispatch_mechanical(
     return attempt
 
 
+def _decision_context_for_failure(
+    task: TaskSpec, failed_attempt: Attempt, attempts: list[Attempt], request: Request
+) -> dict:
+    attempt_count = sum(1 for a in attempts if a.task_id == task.id)
+    return {
+        "task_id": task.id,
+        "node_type_name": task.node_type,
+        "attempt_count_for_task": attempt_count,
+        "max_retries_per_task": request.budgets.max_retries_per_task,
+        "failure_summary": failed_attempt.failure_summary,
+        "evidence_refs": [],
+    }
+
+
+def _resolve_failed_tasks(
+    run: Run,
+    graph: GraphVersion,
+    request: Request,
+    store: Store,
+    deps: ControllerDependencies,
+) -> Run:
+    """
+    Drives every currently-failing task through a decision (retry,
+    escalate, or give up) until either nothing is failing any more, the run
+    leaves ACTIVE, or a round makes no progress at all (every proposal this
+    round was rejected). Bounded by MAX_DECISION_ROUNDS_PER_TICK so a
+    configuration bug can't turn this into an unbounded loop; the ordinary
+    per-task retry budget is what's expected to end things long before that
+    cap is ever reached.
+    """
+
+    def dispatch_retry(
+        task, run, *, model_used, retries_from_attempt_id, escalated_from_attempt_id
+    ):
+        attempts = store.load_attempts(run.id)
+        attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
+        return dispatch_mechanical_attempt(
+            task,
+            run,
+            attempt_number,
+            store,
+            deps.mechanical_registry,
+            model_used=model_used,
+            retries_from_attempt_id=retries_from_attempt_id,
+            escalated_from_attempt_id=escalated_from_attempt_id,
+        )
+
+    for _ in range(MAX_DECISION_ROUNDS_PER_TICK):
+        attempts = store.load_attempts(run.id)
+        failing = _failed_tasks_needing_decision(graph, attempts)
+        if not failing:
+            break
+
+        made_progress = False
+        for task, failed_attempt in failing:
+            if run.status != RunStatus.ACTIVE:
+                break
+            context = _decision_context_for_failure(
+                task, failed_attempt, store.load_attempts(run.id), request
+            )
+            proposal = invoke_decision_node(
+                "retry_or_escalate_policy", context, deps.decision_fn, deps.fallback_policies
+            )
+            try:
+                run = apply_decision(
+                    run,
+                    graph,
+                    request,
+                    proposal,
+                    store=store,
+                    node_registry=deps.node_registry,
+                    permission_registry=deps.permission_registry,
+                    model_registry=deps.model_registry,
+                    dispatch_retry=dispatch_retry,
+                )
+                made_progress = True
+            except RejectedProposalError:
+                store.append_trace_event(
+                    TraceEvent(
+                        id=new_id("tev"),
+                        run_id=run.id,
+                        event_type="proposal_rejected",
+                        payload={"task_id": task.id, "action": proposal.action},
+                        created_at=_now(),
+                    )
+                )
+            graph = store.load_graph_version(run.active_graph_version_id)
+
+        if run.status != RunStatus.ACTIVE:
+            break
+        if not made_progress:
+            # Every proposal this round was rejected — looping again would
+            # just repeat the same rejections. Leave the remaining failures
+            # for the pre-existing unrecoverable-failure check below.
+            break
+
+    return run
+
+
 def controller_tick(
     run_id: str,
     store: Store,
-    mechanical_registry: MechanicalRunnerRegistry,
+    deps: ControllerDependencies,
 ) -> Run:
     """
-    One scheduling pass: dispatch everything currently ready, then
-    recompute the run's terminal status from what actually happened — never
-    from what a task claims about itself. Safe to call repeatedly; a tick
-    that finds nothing ready and nothing newly resolved is a no-op.
+    One scheduling pass: dispatch everything currently ready, drive any
+    currently-failing tasks through a decision, then recompute the run's
+    terminal status from what actually happened — never from what a task or
+    a decision proposal claims about itself.
     """
     run = store.load_run(run_id)
     if run.status != RunStatus.ACTIVE:
@@ -221,39 +399,51 @@ def controller_tick(
 
     for task in _ready_tasks(graph, attempts):
         attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
-        dispatched = _dispatch_mechanical(task, run, attempt_number, store, mechanical_registry)
+        dispatched = dispatch_mechanical_attempt(
+            task, run, attempt_number, store, deps.mechanical_registry
+        )
         attempts.append(dispatched)
 
-    evidence = store.load_evidence(run_id)
+    run = _resolve_failed_tasks(run, graph, request, store, deps)
+    graph = store.load_graph_version(run.active_graph_version_id)
+    attempts = store.load_attempts(run_id)
 
-    # A failed required task takes priority over gate-checking: gates being
-    # "met" can otherwise be vacuously true (no acceptance criterion happens
-    # to reference the failed task), which must never be read as success.
-    if _has_unrecoverable_failure(graph, attempts):
-        run.status = RunStatus.FAILED_EXHAUSTED
-        run.updated_at = _now()
-        store.update_run(run)
-    elif all_required_gates_met(graph, request, evidence):
-        run.status = RunStatus.COMPLETED_VERIFIED
-        run.updated_at = _now()
-        store.update_run(run)
+    if run.status == RunStatus.ACTIVE:
+        # A failed required task takes priority over gate-checking: gates
+        # being "met" can otherwise be vacuously true (no acceptance
+        # criterion happens to reference the failed task), which must never
+        # be read as success.
+        if _has_unrecoverable_failure(graph, attempts):
+            run.status = RunStatus.FAILED_EXHAUSTED
+            run.updated_at = _now()
+            store.update_run(run)
+        else:
+            evidence = store.load_evidence(run_id)
+            if all_required_gates_met(graph, request, evidence):
+                run.status = RunStatus.COMPLETED_VERIFIED
+                run.updated_at = _now()
+                store.update_run(run)
 
     return run
+
+
+def _can_make_progress(graph: GraphVersion, attempts: list[Attempt]) -> bool:
+    return bool(_ready_tasks(graph, attempts)) or bool(
+        _failed_tasks_needing_decision(graph, attempts)
+    )
 
 
 def run_to_completion(
     run_id: str,
     store: Store,
-    mechanical_registry: MechanicalRunnerRegistry,
+    deps: ControllerDependencies,
     max_ticks: int = 1000,
 ) -> Run:
     """
     Drives `controller_tick` until the run reaches a terminal state or
-    stalls (nothing ready to schedule, but not yet complete — expected once
-    a decision layer exists to resolve that; for now, a stall just returns
-    the run as-is rather than looping forever). Reconciles any orphaned
-    attempts first, so this is also the right entry point for resuming a
-    run after a restart.
+    stalls (nothing ready and nothing failing that a decision could still
+    act on). Reconciles any orphaned attempts first, so this is also the
+    right entry point for resuming a run after a restart.
     """
     reconcile_orphaned_attempts(store, run_id)
     for _ in range(max_ticks):
@@ -262,7 +452,7 @@ def run_to_completion(
             return run
         graph = store.load_graph_version(run.active_graph_version_id)
         attempts = store.load_attempts(run_id)
-        if not _ready_tasks(graph, attempts):
+        if not _can_make_progress(graph, attempts):
             return run
-        run = controller_tick(run_id, store, mechanical_registry)
+        run = controller_tick(run_id, store, deps)
     raise RuntimeError(f"run '{run_id}' did not reach a terminal state within {max_ticks} ticks")

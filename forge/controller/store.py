@@ -79,6 +79,13 @@ class Store:
             raise NotFoundError(f"no graph version found for request '{request_id}'")
         return GraphVersion.model_validate_json(row["data"])
 
+    def load_graph_versions(self, request_id: str) -> list[GraphVersion]:
+        rows = self._conn.execute(
+            "SELECT data FROM graph_versions WHERE request_id = ? ORDER BY version ASC",
+            (request_id,),
+        ).fetchall()
+        return [GraphVersion.model_validate_json(r["data"]) for r in rows]
+
     # -- runs -------------------------------------------------------------
 
     def save_run(self, run: Run) -> None:

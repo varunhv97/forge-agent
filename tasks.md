@@ -1,71 +1,48 @@
 # Tasks
 
-Milestones from the plan doc's roadmap. Build order matters — don't skip ahead.
+Milestones from the plan doc's roadmap. Build order matters — don't skip
+ahead. Full detail for completed milestones lives in git history/commit
+messages, not here — this stays a living index, not an archive.
 
-- [x] **M0 — Repo setup + core models + validator.**
-  - [x] venv, requirements.txt/requirements-dev.txt, black config (see
-        `CLAUDE.md`'s Environment section — this got revisited in M2)
-  - [x] CLAUDE.md / requirements.md / architecture.md / tasks.md
-  - [x] Pydantic models (`forge/models/*.py`): common, request, graph,
-        attempt, evidence, decision, permissions, model_registry
-  - [x] `NodeTypeRegistry` / `PermissionProfileRegistry` (`forge/controller/node_registry.py`)
-  - [x] `compile_and_validate` + acyclicity checks + `propagate_invalidation`
-        (`forge/controller/validator.py`)
-  - [x] 24 pytest cases (`tests/validator/`, `tests/models/`) covering
-        structural/type/dependency/gate/invalidation/permission invariants
-        plus the schema-level permission-escalation test
-        — all pass, `black`-formatted
-  - [x] initial commit + pushed to `https://github.com/varunhv97/forge-agent`
-        (branch `main`)
-- [x] **M1 — Controller skeleton + SQLite persistence + mechanical-only nodes, resumability.**
-  - [x] `Run`/`TraceEvent` models (`forge/models/run.py`, `forge/models/trace.py`);
-        `run_id` added to `Attempt`/`Evidence` for querying
-  - [x] SQLite schema + explicit transactions (`forge/controller/db.py`)
-  - [x] `Store`: typed CRUD over requests/graph_versions/runs/attempts/evidence/
-        trace_events, with atomic attempt+evidence writes (`forge/controller/store.py`)
-  - [x] `MechanicalRunnerRegistry` (`forge/controller/mechanical.py`)
-  - [x] Scheduler: readiness, dispatch, `all_required_gates_met`, orphaned-attempt
-        reconciliation on restart (`forge/controller/scheduler.py`)
-  - [x] 15 pytest cases (`tests/controller/`), including a simulated crash
-        mid-dispatch (kill the process after an attempt is marked RUNNING,
-        reopen a fresh connection, resume) proving no duplicate dispatch and
-        no lost work. Found and fixed a real bug in the process: a vacuously-
-        true gate check could mask an unrecoverable task failure.
-  - [x] commit + push
+- [x] **M0 — Repo setup + core models + validator.** Pydantic models,
+      `NodeTypeRegistry`/`PermissionProfileRegistry`, `compile_and_validate`
+      (acyclicity, type/dependency/gate/invalidation/permission checks).
+      24 tests. Pushed to `https://github.com/varunhv97/forge-agent`.
+- [x] **M1 — Controller skeleton + SQLite + mechanical nodes, resumability.**
+      `Run`/`TraceEvent` models, WAL-mode SQLite `Store`,
+      `MechanicalRunnerRegistry`, the scheduler (readiness, dispatch,
+      `all_required_gates_met`, orphaned-attempt reconciliation on
+      restart). 15 tests, including a simulated crash-and-resume.
 - [x] **M2 — Worktree isolation + Claude Agent SDK adapter + PreToolUse hooks.**
-  - [x] Python environment migrated 3.9.6 → 3.11.16: `claude-agent-sdk`
-        requires >=3.10, which system Python didn't have and this machine
-        has no brew/pyenv to get it — a standalone CPython build downloaded
-        into `.runtimes/` is the workaround; see `CLAUDE.md`. Full suite
-        re-verified green on the new interpreter before building further.
-  - [x] `forge/isolation/worktree_manager.py` — `create_worktree`/
-        `remove_worktree` over real git worktrees, idempotent cleanup,
-        10 tests against a real git repo (built via parallel subagent)
-  - [x] `forge/isolation/hooks.py` — the PreToolUse policy decision engine
-        (`ToolCallEvent` → `HookDecision`), adapter-agnostic, tool
-        allowlist + explicit deny patterns + network heuristic + realpath-
-        based path-scope check (catches `../` and symlink escapes),
-        13 tests (built via parallel subagent)
-  - [x] `forge/adapters/execution/sdk_execution_adapter.py` — wires the
-        above into real `claude_agent_sdk` types: translates
-        `PreToolUseHookInput` → `ToolCallEvent` and `HookDecision` back to
-        the SDK's `permissionDecision` shape, builds `ClaudeAgentOptions`
-        (cwd/model/allowed_tools/hooks), and `run_execution_attempt` calls
-        `claude_agent_sdk.query` for real. 13 tests.
-  - [ ] **Known gap, not closed:** the actual live acceptance scenario
-        ("a node tries `git push`, the hook blocks it") needs a real model
-        call, which needs network + `ANTHROPIC_API_KEY` or an authenticated
-        `claude` CLI session — neither is available in this sandbox. What's
-        tested instead: every translation/construction function offline,
-        plus pulling the *exact* callback `ClaudeAgentOptions` would hand
-        to the SDK and invoking it the way the SDK's documented contract
-        says it will be, confirming it denies a disallowed command. The
-        untested part is specifically "does the real `claude` CLI subprocess
-        actually call this callback as advertised" — verified against the
-        SDK's source/type definitions, not against a live run. Revisit once
-        an API key is available to run a true end-to-end check.
-  - [ ] commit (adapter piece) + push
-- [ ] **M3** — decision adapter + bounded `DecisionAction` + `apply_decision`
+      Python migrated 3.9.6 → 3.11.16 (`claude-agent-sdk` needs >=3.10; see
+      `CLAUDE.md`'s Environment section for the standalone-build workaround).
+      `forge/isolation/worktree_manager.py` and `hooks.py` (the policy
+      engine, adapter-agnostic), wired into real `claude_agent_sdk` types by
+      `forge/adapters/execution/sdk_execution_adapter.py`. 26 tests.
+      **Known gap:** the live "model tries `git push`, hook blocks it"
+      scenario needs network + `ANTHROPIC_API_KEY`/an authenticated `claude`
+      CLI, unavailable in this sandbox — everything else is tested offline,
+      including invoking the exact callback the SDK would be handed.
+- [x] **M3 — Decision adapter + bounded `DecisionAction` + `apply_decision`.**
+      `forge/adapters/decision/anthropic_api_decision_adapter.py` (forced
+      tool-use structured output, fully offline-tested via
+      `httpx.MockTransport` — no live-call gap here, unlike M2).
+      `forge/controller/model_registry.py` (`select_model` heuristic +
+      eligibility validation). `forge/controller/decisions.py`
+      (`apply_decision` — the only place a proposal becomes a state change
+      — plus `assert_new_information`, `materialize_revision`,
+      `check_revision_budget`). `forge/controller/decision_dispatch.py`
+      (`invoke_decision_node` + deterministic fallback policies + the fixed
+      `decision_node_type -> model_id` table). Scheduler now drives failed
+      tasks through a decision each tick instead of leaving them failed
+      forever. 34 tests. Found and fixed a real bug:
+      `_has_unrecoverable_failure` checked "ever failed" instead of
+      "latest attempt failed," so a task that recovered via retry was still
+      reported as unrecoverable.
+      `PROPOSE_GRAPH_REVISION` handling here is a head start on M4, not M4
+      itself — `propagate_invalidation` and the commit/touched-paths-based
+      automatic evidence-invalidation rule aren't wired into real scheduler
+      behavior yet.
 - [ ] **M4** — graph revision + invalidation propagation
 - [ ] **M5** — Codex CLI adapter + Docker-sandbox isolation
 - [ ] **M6** — three-tier testing nodes (`integration_test_write_exec`, `manual_test_exec`)
@@ -78,7 +55,6 @@ see `requirements.md` — not scheduled.
 ## Notes
 
 - This machine's home directory is locked down for writes/reads from this
-  tool's shell (even with the sandbox override) — `gh` lives at
-  `.gh-bin` with `GH_CONFIG_DIR=.gh-config` (both gitignored) instead of
-  the usual `~/.local/bin` / `~/.config/gh`. Pushes still need to be run by
+  tool's shell (even with the sandbox override) — `gh` lives at `.gh-bin`
+  with `GH_CONFIG_DIR=.gh-config` (both gitignored). Pushes must be run by
   the user directly; this tool's shell cannot reach git credentials.

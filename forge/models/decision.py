@@ -40,6 +40,7 @@ class DecisionProposal(BaseModel):
     escalate_to_model: str | None = None
     graph_revision: GraphRevisionProposal | None = None
     user_question: str | None = None
+    rationale: str | None = None  # free-text explanation, used by STOP_SUCCESS/STOP_BLOCKED
     confidence: float
     evidence_refs: list[str] = []  # required, non-empty for anything but SCHEDULE_ELIGIBLE
     model_used: str

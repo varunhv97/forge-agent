@@ -31,9 +31,15 @@ forge/
     store.py             typed CRUD over the schema above
     mechanical.py        MechanicalRunnerRegistry — deterministic checks,
                           no LLM, no adapter
-    scheduler.py          controller_tick / run_to_completion / reconcile
-                          (mechanical nodes only so far — decision-driven
-                          retry/escalate/revision is M3/M4)
+    model_registry.py    ModelRegistry (escalation eligibility) + select_model
+    decisions.py          apply_decision — the only place a DecisionProposal
+                          becomes a real state change (see below)
+    decision_dispatch.py  invoke_decision_node + deterministic fallbacks +
+                          the fixed decision_node_type->model_id table
+    scheduler.py          controller_tick / run_to_completion / reconcile;
+                          failed tasks get driven through a decision each
+                          tick instead of staying failed forever (mechanical
+                          nodes only — EXECUTION-node dispatch is M6/M7)
   nodes/          one module per node type, each owning its own prompt,
                   context-building, schemas, permission profile  (not yet)
   adapters/
@@ -41,7 +47,8 @@ forge/
                   into real claude_agent_sdk types (ClaudeAgentOptions,
                   HookMatcher); codex_cli_adapter.py (container-enforced,
                   not yet — M5)
-    decision/     anthropic_api_decision_adapter.py              (not yet — M3)
+    decision/     anthropic_api_decision_adapter.py — direct Anthropic
+                  Messages API calls with forced tool-use structured output
     deploy/       deploy_adapter_base.py, vercel_adapter.py       (not yet — M7)
   isolation/
     worktree_manager.py  create_worktree/remove_worktree over real git
@@ -62,6 +69,17 @@ attempt still `RUNNING` when a run resumes was abandoned by a prior process
 — `reconcile_orphaned_attempts` cancels it so the scheduler dispatches a
 fresh attempt rather than waiting on one that will never report back.
 
+## Decisions, concretely
+
+A decision node's output (`DecisionProposal`) is bounded and typed — never
+free text, never trusted directly. `apply_decision` is the only place one
+becomes a state change, validated against the controller's own authority
+first: `STOP_SUCCESS` re-derives `all_required_gates_met()` itself; a retry
+must cite evidence, stay within `max_retries_per_task`, and not just repeat
+the prior failure verbatim; an escalation's model is checked against
+`ModelRegistry` before dispatch. Any decision-adapter failure falls back
+to a hand-written deterministic policy rather than hanging the run.
+
 ## Enforcement, concretely
 
 - Claude Agent SDK attempts: a PreToolUse hook, generated per attempt from
@@ -76,15 +94,10 @@ fresh attempt rather than waiting on one that will never report back.
   a Docker container mounting only that attempt's worktree. The dispatcher
   refuses to run a non-hook-capable adapter outside a container. Not built
   yet (M5).
-- Either way: `STOP_SUCCESS` from a decision node is a recommendation only
-  — the controller independently recomputes `all_required_gates_met()` from
-  persisted `Evidence` rows before ever marking a run complete.
 
-**Known gap:** the SDK adapter's translation/construction logic is tested
-offline (no network); the live scenario of an actual model deciding to call
-a disallowed tool, and the real `claude` CLI subprocess invoking our hook
-callback, has not been run — this sandbox has no `ANTHROPIC_API_KEY` or
-authenticated `claude` CLI session. See `tasks.md`'s M2 entry.
+**Known gap:** the live scenario (a model actually calling a disallowed
+tool, the real `claude` CLI invoking our hook) hasn't run — no API key in
+this sandbox. Everything else is tested offline. See `tasks.md`'s M2 entry.
 
 ## Status
 
