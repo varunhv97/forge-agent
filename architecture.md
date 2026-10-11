@@ -139,15 +139,18 @@ starting over.
   `run_codex_in_sandbox` owns the full lifecycle and guarantees
   `stop_container` runs even when the attempt itself fails.
 
-**Known gaps:** the live model-tries-a-disallowed-tool scenario hasn't run
-end-to-end in this sandbox (no login here — `scripts/live_smoke_test.py`
-is built and ready for whoever does have one); the commit-based automatic
+**Known gaps:** `scripts/live_smoke_test.py` has now been run successfully
+by the user with real credentials (a basic `implement_exec` →
+`unit_verify_exec` run, `completed_verified`) — EXECUTION dispatch and the
+PreToolUse hook path are confirmed working live, end to end. Not yet
+exercised live: a hook actually *denying* a disallowed tool call (the
+smoke test's task never attempted one). The commit-based automatic
 invalidation rule (`invalidation.py`) now has real commits available to
 feed it (EXECUTION dispatch produces them for real as of M6) but isn't
-wired into the scheduler yet — that's still open work, not a sandbox
-limitation; neither Docker nor the Codex CLI is installed here, so that
-path is tested entirely by mocking `subprocess.run`, and its JSONL
-event-schema assumption is an unverified best guess. All are built and
+wired into the scheduler yet — that's open work, not a sandbox limitation.
+Neither Docker nor the Codex CLI is installed in this sandbox, so that
+path is still tested entirely by mocking `subprocess.run`, and its JSONL
+event-schema assumption is still an unverified best guess. All are built and
 tested as thoroughly as this sandbox allows.
 
 ## Status

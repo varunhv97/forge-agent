@@ -86,7 +86,7 @@ messages, not here — this stays a living index, not an archive.
       `parse_codex_jsonl`'s `final_message` extraction is a documented
       best-effort guess for the same reason and needs checking against a
       real `codex exec --json` run.
-- [~] **M6 — Three-tier testing nodes + EXECUTION dispatch wired live.**
+- [x] **M6 — Three-tier testing nodes + EXECUTION dispatch wired live.**
       `forge/nodes/` populated for real — `implement_exec`,
       `integration_test_write_exec`, `manual_test_exec` (parallel subagent),
       `unit_verify_exec`/`integration_verify_exec` (mine, worktree-aware
@@ -101,14 +101,14 @@ messages, not here — this stays a living index, not an archive.
       end-to-end test (real git repo, real worktree, real `pytest -q`,
       only the LLM call faked) proving `implement_exec → unit_verify_exec`
       completes a run.
-      **Live-verified, not just "known gap" this time:**
-      `scripts/live_smoke_test.py`, run from a terminal with an
-      authenticated `claude` CLI (can't run from this sandbox — same
-      restriction as `git push`). Ran it here: three clean retries, each
-      with its own fresh worktree, failing only on "Not logged in" —
-      exactly the expected failure point, confirming everything else
-      works. Marked `[~]` until it's actually run successfully with real
-      credentials.
+      **Live-verified for real, not just "known gap" this time:**
+      `scripts/live_smoke_test.py`, run by the user from their own terminal
+      with an authenticated `claude` CLI (can't run from this sandbox —
+      same restriction as `git push`). Result: `completed_verified`, a
+      real `result_commit`, and `unit_verify_exec` running in the exact
+      same worktree `implement_exec` produced — confirming the worktree-
+      reuse design works against the real SDK, not just in offline tests.
+      The first genuinely end-to-end live run in this project.
       Deferred to M7 (needs merge/deploy orchestration that doesn't exist
       yet): `manual_test_exec` isn't wired into `ExecutionHandlerRegistry`
       (needs a deploy URL source); `integration_test_write_exec`/
