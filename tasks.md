@@ -65,8 +65,27 @@ messages, not here — this stays a living index, not an archive.
       earlier in its history. 12 new tests, including a full
       run-completes → evidence-invalidated → re-dispatched →
       re-completes-on-fresh-evidence scheduler test.
-- [ ] **M5** — Codex CLI adapter + Docker-sandbox isolation
-- [ ] **M5** — Codex CLI adapter + Docker-sandbox isolation
+- [x] **M5 — Codex CLI adapter + Docker-sandbox isolation.**
+      `forge/isolation/docker_sandbox.py` (`launch_container`/
+      `exec_in_container`/`stop_container`, idempotent cleanup — built via
+      parallel subagent) and `forge/adapters/execution/codex_cli_adapter.py`
+      (`build_codex_command`/`parse_codex_jsonl`/`run_codex_attempt`,
+      decoupled from the sandbox via a duck-typed executor — built via a
+      second parallel subagent). `forge/adapters/execution/
+      codex_execution_adapter.py` (mine) wires the two together
+      (`run_codex_in_sandbox`), including the small interface mismatch
+      between them (keyword-only vs. positional `cwd`), and guarantees
+      container cleanup in a `finally` even when the attempt itself fails.
+      Codex attempts refuse to run at all without a container — structural,
+      not configurable, mirroring the Claude Agent SDK's hook requirement.
+      25 new tests. **Known gap, same pattern as M2/M4:** neither Docker nor
+      the Codex CLI is installed in this sandbox, so everything is tested
+      by mocking `subprocess.run` to simulate exactly what each would do —
+      real, correct code and command construction, not yet verified
+      against the real binaries. The Codex JSONL event schema used by
+      `parse_codex_jsonl`'s `final_message` extraction is a documented
+      best-effort guess for the same reason and needs checking against a
+      real `codex exec --json` run.
 - [ ] **M6** — three-tier testing nodes (`integration_test_write_exec`, `manual_test_exec`)
 - [ ] **M7** — Feature Blast end-to-end with a real Vercel deployment (flagship milestone)
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
