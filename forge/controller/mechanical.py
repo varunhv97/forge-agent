@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import subprocess
-from typing import Callable, Dict
+from dataclasses import dataclass
+from typing import Callable, Dict, Optional
 
 from pydantic import BaseModel
 
@@ -13,7 +14,24 @@ class MechanicalResult(BaseModel):
     summary: str = ""
 
 
-MechanicalRunner = Callable[[TaskSpec], MechanicalResult]
+@dataclass
+class MechanicalContext:
+    """
+    What a mechanical runner needs from the scheduler beyond the task spec
+    itself. Currently just the directory it should operate in: a
+    dependency-driven mechanical task (e.g. `unit_verify_exec`) runs inside
+    the worktree an upstream EXECUTION attempt (e.g. `implement_exec`)
+    already produced, rather than getting a worktree of its own — it's
+    verifying that output, not creating new work. `worktree_path=None`
+    means "no upstream attempt produced a worktree," in which case a
+    runner falls back to its own process's current directory, preserving
+    the behavior every mechanical node had before this existed.
+    """
+
+    worktree_path: Optional[str] = None
+
+
+MechanicalRunner = Callable[[TaskSpec, MechanicalContext], MechanicalResult]
 
 
 class UnknownMechanicalRunnerError(KeyError):
@@ -50,12 +68,21 @@ def make_shell_runner(command: list[str], timeout_seconds: float = 60.0) -> Mech
     it exits zero. A real deployment would have one of these per actual
     check (running pytest, a linter, a deploy-status probe); this is the
     minimal, genuinely mechanical building block they'd all share.
+
+    Runs in `context.worktree_path` when one is given (e.g. verifying code
+    an upstream `implement_exec` attempt just wrote), and in the current
+    process's own directory otherwise — the same behavior this had before
+    `MechanicalContext` existed.
     """
 
-    def runner(_task: TaskSpec) -> MechanicalResult:
+    def runner(_task: TaskSpec, context: MechanicalContext) -> MechanicalResult:
         try:
             result = subprocess.run(
-                command, capture_output=True, text=True, timeout=timeout_seconds
+                command,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=context.worktree_path,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             return MechanicalResult(passed=False, summary=f"failed to execute: {exc}")

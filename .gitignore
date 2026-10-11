@@ -12,3 +12,4 @@ artifacts/
 .DS_Store
 .runtimes/
 .claude/worktrees/
+.env.local

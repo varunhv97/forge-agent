@@ -3,8 +3,15 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Dict, Optional, Union
 
+from forge.controller.attempt_commit import (
+    GitStateError,
+    changed_paths_between,
+    commit_dirty_changes,
+    current_head,
+)
 from forge.controller.decision_dispatch import (
     DEFAULT_FALLBACK_POLICIES,
     DecisionFn,
@@ -12,10 +19,12 @@ from forge.controller.decision_dispatch import (
     invoke_decision_node,
 )
 from forge.controller.decisions import RejectedProposalError, apply_decision
-from forge.controller.mechanical import MechanicalRunnerRegistry
+from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunner
+from forge.controller.mechanical import MechanicalContext, MechanicalRunnerRegistry
 from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.store import Store
+from forge.isolation.worktree_manager import create_worktree
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.common import NodeKind
 from forge.models.evidence import Evidence
@@ -49,6 +58,15 @@ class ControllerDependencies:
     fallback_policies: Dict[str, FallbackFn] = field(
         default_factory=lambda: dict(DEFAULT_FALLBACK_POLICIES)
     )
+    # EXECUTION-kind dispatch is entirely optional: with execution_runner
+    # left as None, EXECUTION tasks behave exactly as they did before this
+    # existed (never become ready, the run stalls on them) — nothing below
+    # requires an execution runtime to be configured.
+    execution_handler_registry: ExecutionHandlerRegistry = field(
+        default_factory=ExecutionHandlerRegistry
+    )
+    execution_runner: Optional[ExecutionRunner] = None
+    repo_root: Optional[Path] = None
 
 
 def new_id(prefix: str) -> str:
@@ -102,16 +120,21 @@ def reconcile_orphaned_attempts(store: Store, run_id: str) -> int:
     return reconciled
 
 
-def _ready_tasks(graph: GraphVersion, attempts: list[Attempt]) -> list[TaskSpec]:
+def _ready_tasks(
+    graph: GraphVersion, attempts: list[Attempt], *, execution_available: bool = False
+) -> list[TaskSpec]:
     latest_by_task = _latest_attempt_per_task(attempts)
 
     ready: list[TaskSpec] = []
     for task in graph.tasks:
-        if task.node_kind != NodeKind.MECHANICAL:
-            # Execution nodes need an LLM-driven adapter (Claude Agent SDK /
-            # Codex CLI), which doesn't exist yet. Until that adapter layer
-            # is wired in, a non-mechanical task simply never becomes ready
-            # — it stalls the run rather than being silently skipped.
+        if task.node_kind == NodeKind.EXECUTION and not execution_available:
+            # No execution runner is configured for this run — an
+            # EXECUTION task simply never becomes ready, stalling the run
+            # on it rather than being silently skipped. (With a runner
+            # configured, EXECUTION and MECHANICAL tasks follow the exact
+            # same readiness rule below.)
+            continue
+        if task.node_kind not in (NodeKind.MECHANICAL, NodeKind.EXECUTION):
             continue
         current = latest_by_task.get(task.id)
         if current is not None and current.status in (
@@ -209,6 +232,22 @@ def all_required_gates_met(
     return True
 
 
+def _upstream_worktree_path(task: TaskSpec, attempts: list[Attempt]) -> Optional[str]:
+    """
+    A mechanical task that depends on something which produced a worktree
+    (an EXECUTION attempt) runs inside that same worktree — it's verifying
+    that output, not starting fresh. Returns the first upstream dependency's
+    worktree path found among PASSED attempts, or None if none of them
+    produced one (ordinary mechanical-only chains, unaffected).
+    """
+    latest_by_task = _latest_attempt_per_task(attempts)
+    for dep_id in task.depends_on:
+        dep_attempt = latest_by_task.get(dep_id)
+        if dep_attempt and dep_attempt.status == AttemptStatus.PASSED and dep_attempt.worktree_path:
+            return dep_attempt.worktree_path
+    return None
+
+
 def dispatch_mechanical_attempt(
     task: TaskSpec,
     run: Run,
@@ -219,13 +258,19 @@ def dispatch_mechanical_attempt(
     model_used: str = "mechanical",
     retries_from_attempt_id: Optional[str] = None,
     escalated_from_attempt_id: Optional[str] = None,
+    all_attempts: Optional[list[Attempt]] = None,
 ) -> Attempt:
     """
     Creates and synchronously runs one attempt for `task`. Used both by the
     normal dependency-driven readiness loop (a fresh task, no retry/escalate
     lineage) and by decision handling (a forward-pointing retry/escalation
     attempt) — the only difference is the optional lineage/model fields.
+
+    Runs inside an upstream EXECUTION dependency's worktree when one exists
+    (`all_attempts` is how the caller supplies the attempt history needed to
+    find it); otherwise behaves exactly as before.
     """
+    worktree_path = _upstream_worktree_path(task, all_attempts or [])
     attempt = Attempt(
         id=new_id("att"),
         run_id=run.id,
@@ -236,7 +281,7 @@ def dispatch_mechanical_attempt(
         escalated_from_attempt_id=escalated_from_attempt_id,
         model_used=model_used,
         permission_profile=task.permission_profile,
-        worktree_path="",
+        worktree_path=worktree_path or "",
         branch_name="",
         base_commit="",
         status=AttemptStatus.RUNNING,
@@ -248,12 +293,13 @@ def dispatch_mechanical_attempt(
     store.save_attempt(attempt)
 
     runner = mechanical_registry.get(task.node_type)
-    result = runner(task)
+    result = runner(task, MechanicalContext(worktree_path=worktree_path))
 
     attempt.status = AttemptStatus.PASSED if result.passed else AttemptStatus.FAILED
     attempt.finished_at = _now()
     attempt.failure_summary = None if result.passed else result.summary
 
+    commit_sha = current_head(worktree_path) if worktree_path else ""
     evidence = [
         Evidence(
             id=new_id("ev"),
@@ -263,7 +309,7 @@ def dispatch_mechanical_attempt(
             acceptance_criterion_id=criterion_id,
             kind="test_result",
             passed=result.passed,
-            commit_sha="",
+            commit_sha=commit_sha,
             raw_artifact_id=attempt.id,
             created_at=_now(),
         )
@@ -280,6 +326,169 @@ def dispatch_mechanical_attempt(
                 "attempt_id": attempt.id,
                 "status": attempt.status,
                 "summary": result.summary,
+            },
+            created_at=_now(),
+        )
+    )
+    return attempt
+
+
+def _collect_upstream_outputs(
+    task: TaskSpec, graph: GraphVersion, attempts: list[Attempt], node_registry: NodeTypeRegistry
+) -> Dict[str, object]:
+    """
+    Builds the `{upstream_task_id: parsed_output_model}` mapping an
+    EXECUTION node's `build_input` consumes. Only PASSED dependencies
+    contribute, and only if their recorded output actually parses back
+    into their own node type's output schema — a node's context is built
+    from what upstream work actually produced, never from guessing.
+    """
+    task_by_id = {t.id: t for t in graph.tasks}
+    latest_by_task = _latest_attempt_per_task(attempts)
+    outputs: Dict[str, object] = {}
+    for dep_id in task.depends_on:
+        dep_attempt = latest_by_task.get(dep_id)
+        if dep_attempt is None or dep_attempt.status != AttemptStatus.PASSED:
+            continue
+        dep_task = task_by_id.get(dep_id)
+        if dep_task is None:
+            continue
+        try:
+            dep_node_type = node_registry.get(dep_task.node_type)
+            outputs[dep_id] = dep_node_type.output_schema.model_validate(dep_attempt.outputs)
+        except Exception:
+            continue
+    return outputs
+
+
+def dispatch_execution_attempt(
+    task: TaskSpec,
+    run: Run,
+    graph: GraphVersion,
+    request: Request,
+    attempt_number: int,
+    store: Store,
+    node_registry: NodeTypeRegistry,
+    permission_registry: PermissionProfileRegistry,
+    execution_handler_registry: ExecutionHandlerRegistry,
+    execution_runner: ExecutionRunner,
+    repo_root: Path,
+    *,
+    model_used: Optional[str] = None,
+    retries_from_attempt_id: Optional[str] = None,
+    escalated_from_attempt_id: Optional[str] = None,
+) -> Attempt:
+    """
+    Creates and synchronously runs one EXECUTION attempt: a fresh worktree,
+    a prompt built from the node type's own context-building logic, a call
+    to whatever runtime `execution_runner` wraps (Claude Agent SDK today),
+    and then — regardless of what the runner reports — a mechanical
+    derivation of the actual result from git: any uncommitted changes in
+    the worktree get committed as a safety net, the resulting HEAD becomes
+    `result_commit`, and a real `git diff` against the base commit becomes
+    `changed_paths`. A node's own claims about what it did are never the
+    source of truth for this; git is.
+    """
+    node_type = node_registry.get(task.node_type)
+    profile = permission_registry.get(task.permission_profile)
+    handlers = execution_handler_registry.get(task.node_type)
+    model = model_used or node_type.default_model
+    if model is None:
+        raise ValueError(f"no model configured for node type '{task.node_type}'")
+
+    attempt_id = new_id("att")
+    base_commit = current_head(repo_root)
+    worktree = create_worktree(repo_root, task.id, attempt_id, base_commit)
+
+    attempt = Attempt(
+        id=attempt_id,
+        run_id=run.id,
+        task_id=task.id,
+        graph_version_id=run.active_graph_version_id,
+        attempt_number=attempt_number,
+        retries_from_attempt_id=retries_from_attempt_id,
+        escalated_from_attempt_id=escalated_from_attempt_id,
+        model_used=model,
+        permission_profile=task.permission_profile,
+        worktree_path=worktree.worktree_path,
+        branch_name=worktree.branch_name,
+        base_commit=base_commit,
+        status=AttemptStatus.RUNNING,
+        started_at=_now(),
+    )
+    # Durable before execution: if the process dies right after this write,
+    # the attempt is left RUNNING for reconcile_orphaned_attempts to find
+    # and cancel on the next startup — never silently lost.
+    store.save_attempt(attempt)
+
+    attempts = store.load_attempts(run.id)
+    upstream_outputs = _collect_upstream_outputs(task, graph, attempts, node_registry)
+    input_data = handlers.build_input(task, request, upstream_outputs)
+    prompt = handlers.build_prompt(input_data)
+
+    outcome = execution_runner(model, prompt, profile, worktree.worktree_path)
+
+    passed = False
+    summary = outcome.summary
+    output_dict: Dict[str, object] = {}
+
+    if outcome.completed:
+        try:
+            commit_dirty_changes(worktree.worktree_path, f"forge: {task.id} attempt {attempt.id}")
+            result_commit = current_head(worktree.worktree_path)
+        except GitStateError as exc:
+            result_commit = base_commit
+            summary = f"failed to determine resulting commit: {exc}"
+        if result_commit == base_commit:
+            summary = (
+                f"no changes were committed (runner reported: {summary})"
+                if summary
+                else "no changes were committed"
+            )
+        else:
+            changed_paths = changed_paths_between(
+                worktree.worktree_path, base_commit, result_commit
+            )
+            output_dict = {
+                "result_commit": result_commit,
+                "changed_paths": changed_paths,
+                "summary": summary,
+            }
+            passed = True
+
+    attempt.status = AttemptStatus.PASSED if passed else AttemptStatus.FAILED
+    attempt.finished_at = _now()
+    attempt.failure_summary = None if passed else summary
+    attempt.outputs = output_dict
+    attempt.result_commit = output_dict.get("result_commit")
+
+    evidence = [
+        Evidence(
+            id=new_id("ev"),
+            run_id=run.id,
+            attempt_id=attempt.id,
+            task_id=task.id,
+            acceptance_criterion_id=criterion_id,
+            kind="test_result",
+            passed=passed,
+            commit_sha=output_dict.get("result_commit", base_commit),
+            touched_paths=output_dict.get("changed_paths", []),
+            raw_artifact_id=attempt.id,
+            created_at=_now(),
+        )
+        for criterion_id in task.acceptance_criterion_ids
+    ]
+    store.record_attempt_result(attempt, evidence)
+    store.append_trace_event(
+        TraceEvent(
+            id=new_id("tev"),
+            run_id=run.id,
+            event_type="attempt_finished",
+            payload={
+                "task_id": task.id,
+                "attempt_id": attempt.id,
+                "status": attempt.status,
+                "summary": summary,
             },
             created_at=_now(),
         )
@@ -323,6 +532,27 @@ def _resolve_failed_tasks(
     ):
         attempts = store.load_attempts(run.id)
         attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
+        if task.node_kind == NodeKind.EXECUTION:
+            if deps.execution_runner is None or deps.repo_root is None:
+                raise RejectedProposalError(
+                    f"'{task.id}' is an EXECUTION task but no execution runner is configured"
+                )
+            return dispatch_execution_attempt(
+                task,
+                run,
+                graph,
+                request,
+                attempt_number,
+                store,
+                deps.node_registry,
+                deps.permission_registry,
+                deps.execution_handler_registry,
+                deps.execution_runner,
+                deps.repo_root,
+                model_used=model_used,
+                retries_from_attempt_id=retries_from_attempt_id,
+                escalated_from_attempt_id=escalated_from_attempt_id,
+            )
         return dispatch_mechanical_attempt(
             task,
             run,
@@ -332,6 +562,7 @@ def _resolve_failed_tasks(
             model_used=model_used,
             retries_from_attempt_id=retries_from_attempt_id,
             escalated_from_attempt_id=escalated_from_attempt_id,
+            all_attempts=attempts,
         )
 
     for _ in range(MAX_DECISION_ROUNDS_PER_TICK):
@@ -404,12 +635,28 @@ def controller_tick(
     request = store.load_request(run.request_id)
     graph = store.load_graph_version(run.active_graph_version_id)
     attempts = store.load_attempts(run_id)
+    execution_available = deps.execution_runner is not None and deps.repo_root is not None
 
-    for task in _ready_tasks(graph, attempts):
+    for task in _ready_tasks(graph, attempts, execution_available=execution_available):
         attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
-        dispatched = dispatch_mechanical_attempt(
-            task, run, attempt_number, store, deps.mechanical_registry
-        )
+        if task.node_kind == NodeKind.EXECUTION:
+            dispatched = dispatch_execution_attempt(
+                task,
+                run,
+                graph,
+                request,
+                attempt_number,
+                store,
+                deps.node_registry,
+                deps.permission_registry,
+                deps.execution_handler_registry,
+                deps.execution_runner,
+                deps.repo_root,
+            )
+        else:
+            dispatched = dispatch_mechanical_attempt(
+                task, run, attempt_number, store, deps.mechanical_registry, all_attempts=attempts
+            )
         attempts.append(dispatched)
 
     run = _resolve_failed_tasks(run, graph, request, store, deps)
@@ -435,8 +682,10 @@ def controller_tick(
     return run
 
 
-def _can_make_progress(graph: GraphVersion, attempts: list[Attempt]) -> bool:
-    return bool(_ready_tasks(graph, attempts)) or bool(
+def _can_make_progress(
+    graph: GraphVersion, attempts: list[Attempt], *, execution_available: bool = False
+) -> bool:
+    return bool(_ready_tasks(graph, attempts, execution_available=execution_available)) or bool(
         _failed_tasks_needing_decision(graph, attempts)
     )
 
@@ -454,13 +703,14 @@ def run_to_completion(
     right entry point for resuming a run after a restart.
     """
     reconcile_orphaned_attempts(store, run_id)
+    execution_available = deps.execution_runner is not None and deps.repo_root is not None
     for _ in range(max_ticks):
         run = store.load_run(run_id)
         if run.status != RunStatus.ACTIVE:
             return run
         graph = store.load_graph_version(run.active_graph_version_id)
         attempts = store.load_attempts(run_id)
-        if not _can_make_progress(graph, attempts):
+        if not _can_make_progress(graph, attempts, execution_available=execution_available):
             return run
         run = controller_tick(run_id, store, deps)
     raise RuntimeError(f"run '{run_id}' did not reach a terminal state within {max_ticks} ticks")

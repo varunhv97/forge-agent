@@ -213,7 +213,7 @@ def _flaky_runner(fail_times: int):
     """A mechanical runner that fails `fail_times` times, then passes."""
     calls = {"count": 0}
 
-    def runner(_task):
+    def runner(_task, _context):
         calls["count"] += 1
         if calls["count"] <= fail_times:
             return MechanicalResult(passed=False, summary=f"flaky failure #{calls['count']}")

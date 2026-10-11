@@ -39,17 +39,31 @@ forge/
     invalidation.py       evidence_is_stale — the commit/touched-paths
                           staleness rule, real-git-tested; not yet wired
                           into live dispatch (see Known gap below)
+    execution_registry.py ExecutionHandlerRegistry — the EXECUTION-node
+                          counterpart to MechanicalRunnerRegistry: maps a
+                          node type to its build_input/build_prompt pair
+    attempt_commit.py     current_head/commit_dirty_changes/changed_paths_
+                          between — mechanically derives what an EXECUTION
+                          attempt actually did, from git, never from what
+                          the node claims
     scheduler.py          controller_tick / run_to_completion / reconcile;
-                          failed tasks get driven through a decision each
-                          tick instead of staying failed forever (mechanical
-                          nodes only — EXECUTION-node dispatch is M6/M7)
-  nodes/          one module per node type, each owning its own prompt,
-                  context-building, schemas, permission profile  (not yet)
+                          dispatch_mechanical_attempt and
+                          dispatch_execution_attempt (real worktree, real
+                          prompt, real adapter call); failed tasks of
+                          either kind get driven through a decision each
+                          tick instead of staying failed forever
+  nodes/          implement_exec, integration_test_write_exec,
+                  manual_test_exec (EXECUTION); unit_verify_exec,
+                  integration_verify_exec (MECHANICAL, worktree-aware);
+                  register_all() populates every registry at once
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,
-                  HookMatcher); codex_cli_adapter.py (command construction +
-                  JSONL parsing, decoupled from the sandbox via a duck-typed
+                  HookMatcher); sdk_node_runner.py bridges it to the
+                  scheduler's sync ExecutionRunner contract (asyncio.run,
+                  same pattern as the decision adapter's bridge);
+                  codex_cli_adapter.py (command construction + JSONL
+                  parsing, decoupled from the sandbox via a duck-typed
                   executor); codex_execution_adapter.py (wires the Codex
                   adapter to docker_sandbox, owns the launch/exec/stop
                   lifecycle — stop always runs, even on failure)
@@ -94,6 +108,20 @@ re-verifies instead of a completion check trusting stale work. The
 older evidence row covered) is real-git-tested in `invalidation.py` but
 not wired into live dispatch yet (see Known gaps).
 
+## EXECUTION dispatch, concretely
+
+`dispatch_execution_attempt` creates a real worktree, builds a prompt from
+the node type's own `build_input`/`build_prompt`, and calls whatever
+`ExecutionRunner` is configured — but never trusts that runner's own
+report of what it did. Afterward it commits any dirty changes left in the
+worktree as a safety net, reads the actual resulting commit, and diffs it
+against the base commit for `changed_paths` — `result_commit` and
+`changed_paths` are facts derived from git, not claims a node makes about
+itself. A `MECHANICAL` task that depends on an EXECUTION one (e.g.
+`unit_verify_exec` on `implement_exec`) runs inside that same worktree
+rather than getting a fresh one — it's verifying that output, not
+starting over.
+
 ## Enforcement, concretely
 
 - Claude Agent SDK attempts: a PreToolUse hook, generated per attempt from
@@ -111,14 +139,16 @@ not wired into live dispatch yet (see Known gaps).
   `run_codex_in_sandbox` owns the full lifecycle and guarantees
   `stop_container` runs even when the attempt itself fails.
 
-**Known gaps** (same shape, see `tasks.md`'s M2/M4/M5 entries): the live
-model-tries-a-disallowed-tool scenario hasn't run (no API key in this
-sandbox); the commit-based automatic invalidation rule has no real commits
-to feed it yet (no EXECUTION-node dispatch until M6/M7); neither Docker
-nor the Codex CLI is installed here, so the Codex path is tested entirely
-by mocking `subprocess.run`, and the JSONL event schema its `final_message`
-extraction assumes is an unverified best guess. All are built and tested
-as thoroughly as this sandbox allows — just not exercised by a live run.
+**Known gaps:** the live model-tries-a-disallowed-tool scenario hasn't run
+end-to-end in this sandbox (no login here — `scripts/live_smoke_test.py`
+is built and ready for whoever does have one); the commit-based automatic
+invalidation rule (`invalidation.py`) now has real commits available to
+feed it (EXECUTION dispatch produces them for real as of M6) but isn't
+wired into the scheduler yet — that's still open work, not a sandbox
+limitation; neither Docker nor the Codex CLI is installed here, so that
+path is tested entirely by mocking `subprocess.run`, and its JSONL
+event-schema assumption is an unverified best guess. All are built and
+tested as thoroughly as this sandbox allows.
 
 ## Status
 
