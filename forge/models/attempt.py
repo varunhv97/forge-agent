@@ -39,3 +39,10 @@ class Attempt(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_summary: str | None = None
+    # Set by a mechanical runner that can tell its own failure is not
+    # something retrying will fix (e.g. an invalid credential) — the
+    # scheduler routes a FAILED attempt with this set straight to
+    # REQUEST_USER_INPUT instead of the normal retry_or_escalate_policy
+    # decision, so a bad token doesn't burn the task's retry budget on
+    # three identical, guaranteed-to-fail attempts.
+    requires_user_input: bool = False

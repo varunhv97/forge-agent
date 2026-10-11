@@ -179,8 +179,22 @@ still never trusting anything said in the session's own transcript.
 (same pattern as `live_smoke_test.py`): scaffolds a throwaway Vercel-Python
 toy app, runs the full chain against a real `claude` CLI session and a
 real Vercel deployment, then independently curls the live URL itself
-rather than trusting the run's own `COMPLETED_VERIFIED` — not yet run live,
-same `claude` CLI authentication restriction as `live_smoke_test.py`.
+rather than trusting the run's own `COMPLETED_VERIFIED`.
+
+A first live run surfaced a real gap: `deploy_exec` retried a rejected
+Vercel token 3 times, identically, before giving up — the generic
+`retry_or_escalate_policy` has no way to know a failure is unrecoverable
+rather than just unlucky. Fixed via `Attempt.requires_user_input`/
+`MechanicalResult.requires_user_input`: a mechanical runner that can tell
+its own failure can't be fixed by retrying (deploy_exec, via
+`vercel_adapter.py`'s new `VercelCredentialError` — raised for a 401/403
+auth rejection, distinct from an ordinary `VercelAPIError`) sets this flag,
+and `scheduler._resolve_failed_tasks` routes a FAILED attempt with it
+straight to a synthesized `REQUEST_USER_INPUT` decision
+(`_unrecoverable_failure_proposal`) — no decision adapter call, no retry
+budget spent, one attempt then `BLOCKED_AWAITING_INPUT`. This generalizes
+beyond deploy_exec: any mechanical node can opt into the same fast path by
+setting the flag on its own `MechanicalResult`.
 
 **Known gaps:** `scripts/live_smoke_test.py` has now been run successfully
 by the user with real credentials (a basic `implement_exec` →

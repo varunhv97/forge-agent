@@ -11,6 +11,8 @@ from forge.adapters.deploy.vercel_adapter import (
     DeploymentTimeoutError,
     MissingVercelTokenError,
     VercelAPIError,
+    VercelAuthenticationError,
+    VercelCredentialError,
     VercelDeployAdapter,
 )
 
@@ -89,7 +91,7 @@ def test_missing_token_raises_before_any_http_call():
 
 def test_non_2xx_create_response_raises_vercel_api_error():
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, text="forbidden: invalid token")
+        return httpx.Response(400, text="bad request: malformed files payload")
 
     adapter, _ = _make_adapter(handler)
 
@@ -99,8 +101,49 @@ def test_non_2xx_create_response_raises_vercel_api_error():
             files=[DeploymentFile(path="index.html", content="<h1>hi</h1>")],
         )
 
-    assert exc_info.value.status_code == 403
-    assert "forbidden" in exc_info.value.body
+    assert exc_info.value.status_code == 400
+    assert "bad request" in exc_info.value.body
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_401_or_403_create_response_raises_vercel_authentication_error(status_code):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": {"invalidToken": True}})
+
+    adapter, _ = _make_adapter(handler)
+
+    with pytest.raises(VercelAuthenticationError) as exc_info:
+        adapter.deploy(
+            project_name="my-app",
+            files=[DeploymentFile(path="index.html", content="<h1>hi</h1>")],
+        )
+
+    assert exc_info.value.status_code == status_code
+    assert isinstance(exc_info.value, VercelCredentialError)
+
+
+def test_401_or_403_poll_response_raises_vercel_authentication_error():
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        if request.method == "POST":
+            return httpx.Response(
+                200, json={"id": "dpl_123", "url": "my-app.vercel.app", "readyState": "BUILDING"}
+            )
+        return httpx.Response(403, json={"error": {"invalidToken": True}})
+
+    adapter, _ = _make_adapter(handler)
+
+    with pytest.raises(VercelAuthenticationError):
+        adapter.deploy(
+            project_name="my-app",
+            files=[DeploymentFile(path="index.html", content="<h1>hi</h1>")],
+        )
+
+
+def test_missing_vercel_token_error_is_a_credential_error():
+    assert issubclass(MissingVercelTokenError, VercelCredentialError)
 
 
 def test_error_ready_state_raises_deployment_failed_error():

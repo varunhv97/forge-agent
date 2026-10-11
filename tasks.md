@@ -143,10 +143,32 @@ messages, not here — this stays a living index, not an archive.
       Vercel-Python toy app, asks `implement_exec` to add a new
       `api/greet.py` endpoint, deploys it for real, and independently
       curls the live deployed URL rather than trusting the run's own
-      `COMPLETED_VERIFIED`. 221 tests. **Not yet run live** — needs the
-      user to run it from their own terminal (same `claude` CLI
-      authentication restriction as `live_smoke_test.py`) with a real
-      `VERCEL_TOKEN` in `.env.local`.
+      `COMPLETED_VERIFIED`.
+
+      **First live run (user, from their own terminal):** `implement_exec`
+      and `unit_verify_exec` completed for real against the authenticated
+      `claude` CLI — the first genuinely live EXECUTION pipeline on a
+      non-trivial task. `deploy_exec` then failed 3x identically against a
+      bad/expired Vercel token (`403 ... "invalidToken":true`), burning the
+      task's full retry budget on an error no retry could ever fix before
+      the run gave up (`failed_exhausted`).
+
+      Fixed in response (mine): `Attempt.requires_user_input` and
+      `MechanicalResult.requires_user_input` — a mechanical runner that can
+      tell its own failure is unrecoverable (not just "failed this time")
+      now flags it, and `scheduler._resolve_failed_tasks` routes a FAILED
+      attempt with this flag straight to a synthesized `REQUEST_USER_INPUT`
+      decision (`_unrecoverable_failure_proposal`), skipping
+      `retry_or_escalate_policy` entirely — one attempt, then
+      `BLOCKED_AWAITING_INPUT`, not three wasted ones. `vercel_adapter.py`
+      gained `VercelCredentialError` (base for `MissingVercelTokenError`
+      and the new `VercelAuthenticationError`, raised for a 401/403 from
+      either the create or poll call) so `deploy_exec` can distinguish "the
+      token itself is rejected" from an ordinary `VercelAPIError`. 227
+      tests. **Still not yet run live end-to-end** — needs the user to
+      regenerate/re-verify `VERCEL_TOKEN` in `.env.local` and re-run
+      `scripts/live_feature_blast_m7.py` from their own terminal (same
+      `claude` CLI authentication restriction as `live_smoke_test.py`).
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
 
 Everything past M8 (other modes, a third adapter, dashboard) is backlog —

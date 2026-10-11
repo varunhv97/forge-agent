@@ -37,7 +37,16 @@ class VercelDeploymentError(Exception):
     """Base class for every failure this adapter can raise."""
 
 
-class MissingVercelTokenError(VercelDeploymentError):
+class VercelCredentialError(VercelDeploymentError):
+    """
+    Base class for failures caused by the credential itself, as opposed to
+    the request or the deployment. A caller that wants to stop retrying
+    rather than repeat an unrecoverable failure (e.g. Forge's `deploy_exec`
+    runner) can catch this base rather than every concrete subclass.
+    """
+
+
+class MissingVercelTokenError(VercelCredentialError):
     """
     Raised when `deploy` is invoked but no API token is available — neither
     passed to the constructor nor present in `VERCEL_TOKEN` at call time.
@@ -45,12 +54,27 @@ class MissingVercelTokenError(VercelDeploymentError):
     """
 
 
+class VercelAuthenticationError(VercelCredentialError):
+    """
+    Raised when the Vercel API itself rejects the token — a 401 or 403
+    response from either the create-deployment or the poll-deployment
+    endpoint. Unlike a generic `VercelAPIError`, retrying with the exact
+    same token is guaranteed to fail the same way again; only a different
+    (or fixed) credential can change the outcome.
+    """
+
+    def __init__(self, status_code: int, body: str) -> None:
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"Vercel rejected the API token (status {status_code}): {body[:2000]}")
+
+
 class VercelAPIError(VercelDeploymentError):
     """
-    Raised immediately for a non-2xx response from either the
-    create-deployment or the poll-deployment endpoint. This is a request
-    failure, not a deployment outcome — one more attempt with the same
-    inputs would fail the same way, so it is not retried.
+    Raised for any other non-2xx response from either the create-deployment
+    or the poll-deployment endpoint (i.e. not a 401/403 — see
+    `VercelAuthenticationError` for those). This is a request failure, not
+    a deployment outcome.
     """
 
     def __init__(self, status_code: int, body: str) -> None:
@@ -145,6 +169,13 @@ class VercelDeployAdapter:
         }
 
     @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        if response.status_code in (401, 403):
+            raise VercelAuthenticationError(response.status_code, response.text)
+        if response.status_code >= 300:
+            raise VercelAPIError(response.status_code, response.text)
+
+    @staticmethod
     def _extract_error_detail(payload: dict[str, Any], raw_text: str) -> str:
         error = payload.get("error")
         if isinstance(error, dict):
@@ -168,8 +199,7 @@ class VercelDeployAdapter:
 
         body = self._build_request_body(project_name=project_name, files=files, target=target)
         create_response = self._http_client.post(VERCEL_DEPLOYMENTS_URL, json=body, headers=headers)
-        if create_response.status_code >= 300:
-            raise VercelAPIError(create_response.status_code, create_response.text)
+        self._raise_for_status(create_response)
 
         current_payload = create_response.json()
         deployment_id = current_payload["id"]
@@ -197,8 +227,7 @@ class VercelDeployAdapter:
             poll_response = self._http_client.get(
                 f"{VERCEL_DEPLOYMENTS_URL}/{deployment_id}", headers=headers
             )
-            if poll_response.status_code >= 300:
-                raise VercelAPIError(poll_response.status_code, poll_response.text)
+            self._raise_for_status(poll_response)
 
             current_payload = poll_response.json()
             url = current_payload.get("url", url)

@@ -30,6 +30,7 @@ from forge.controller.store import Store
 from forge.isolation.worktree_manager import create_worktree
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.common import NodeKind
+from forge.models.decision import DecisionAction, DecisionProposal
 from forge.models.evidence import Evidence
 from forge.models.graph import GraphVersion, TaskSpec
 from forge.models.request import Request
@@ -302,6 +303,7 @@ def dispatch_mechanical_attempt(
     attempt.finished_at = _now()
     attempt.failure_summary = None if result.passed else result.summary
     attempt.outputs = result.outputs
+    attempt.requires_user_input = (not result.passed) and result.requires_user_input
 
     commit_sha = current_head(worktree_path) if worktree_path else ""
     evidence = [
@@ -556,6 +558,32 @@ def _decision_context_for_failure(
     }
 
 
+def _unrecoverable_failure_proposal(task: TaskSpec, failed_attempt: Attempt) -> DecisionProposal:
+    """
+    Synthesizes a REQUEST_USER_INPUT proposal directly, with no decision
+    adapter or fallback policy involved, for a failure the runner itself
+    already identified as unrecoverable by retrying (`Attempt.
+    requires_user_input`). This is mechanical, not judgment — the signal
+    is unambiguous, so no model call is worth making for it, and routing
+    it through `retry_or_escalate_policy` at all would just spend the
+    task's retry budget on repeats of a failure no retry could fix.
+    """
+    return DecisionProposal(
+        id=new_id("dec"),
+        decision_node_type="unrecoverable_failure_policy",
+        action=DecisionAction.REQUEST_USER_INPUT,
+        target_task_ids=[task.id],
+        user_question=(
+            f"Task '{task.id}' failed in a way that retrying cannot fix: "
+            f"{failed_attempt.failure_summary}"
+        ),
+        confidence=1.0,
+        evidence_refs=[f"attempt:{failed_attempt.id}"],
+        model_used="mechanical:unrecoverable_failure_policy",
+        created_at=_now(),
+    )
+
+
 def _resolve_failed_tasks(
     run: Run,
     graph: GraphVersion,
@@ -621,12 +649,15 @@ def _resolve_failed_tasks(
         for task, failed_attempt in failing:
             if run.status != RunStatus.ACTIVE:
                 break
-            context = _decision_context_for_failure(
-                task, failed_attempt, store.load_attempts(run.id), request
-            )
-            proposal = invoke_decision_node(
-                "retry_or_escalate_policy", context, deps.decision_fn, deps.fallback_policies
-            )
+            if failed_attempt.requires_user_input:
+                proposal = _unrecoverable_failure_proposal(task, failed_attempt)
+            else:
+                context = _decision_context_for_failure(
+                    task, failed_attempt, store.load_attempts(run.id), request
+                )
+                proposal = invoke_decision_node(
+                    "retry_or_escalate_policy", context, deps.decision_fn, deps.fallback_policies
+                )
             try:
                 run = apply_decision(
                     run,

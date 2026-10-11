@@ -283,6 +283,49 @@ def test_failed_task_exhausts_budget_and_stops_blocked_via_decision(
     assert len(decision_events) == 1
 
 
+def test_unrecoverable_mechanical_failure_blocks_immediately_without_retrying(
+    store: Store, request_factory, task_factory, graph_factory
+):
+    """
+    A mechanical runner that flags `requires_user_input=True` (e.g.
+    deploy_exec classifying a rejected Vercel credential) must skip
+    retry_or_escalate_policy entirely — one attempt, then
+    BLOCKED_AWAITING_INPUT, never burning the task's retry budget on
+    repeats of a failure no retry could fix.
+    """
+
+    def credential_failure_runner(_task, _context):
+        return MechanicalResult(
+            passed=False, summary="invalid credential", requires_user_input=True
+        )
+
+    registry = MechanicalRunnerRegistry()
+    registry.register("bad_credential", credential_failure_runner)
+    deps = ControllerDependencies(mechanical_registry=registry)
+
+    t1 = task_factory("t1", node_type="bad_credential", node_kind=NodeKind.MECHANICAL)
+    graph = graph_factory([t1])
+    req = request_factory()
+
+    run = start_run(req, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.BLOCKED_AWAITING_INPUT
+    assert result.blocker_message is not None
+    assert "invalid credential" in result.blocker_message
+    attempts = store.load_attempts(run.id)
+    assert len(attempts) == 1
+    assert attempts[0].requires_user_input is True
+    decision_events = [
+        e
+        for e in store.load_trace_events(run.id)
+        if e.event_type == "decision_applied"
+        and e.payload.get("outcome") == "blocked_awaiting_input"
+    ]
+    assert len(decision_events) == 1
+    assert decision_events[0].payload["decision_node_type"] == "unrecoverable_failure_policy"
+
+
 def test_live_decision_fn_overrides_fallback(
     store: Store, request_factory, task_factory, graph_factory
 ):

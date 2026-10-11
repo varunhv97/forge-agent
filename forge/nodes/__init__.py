@@ -58,9 +58,7 @@ MECHANICAL_DEFAULT = PermissionProfile(name="mechanical_default", allowed_tools=
 # node that actually reaches the network (the Vercel API), so it needs its
 # own profile with network_allowed=True rather than reusing
 # MECHANICAL_DEFAULT.
-DEPLOY_DEFAULT = PermissionProfile(
-    name="deploy_default", allowed_tools=[], network_allowed=True
-)
+DEPLOY_DEFAULT = PermissionProfile(name="deploy_default", allowed_tools=[], network_allowed=True)
 
 
 def _manual_test_build_input(

@@ -20,6 +20,14 @@ class MechanicalResult(BaseModel):
     # one. Most mechanical runners (pytest, lint) have nothing structured
     # to report and leave this empty.
     outputs: Dict[str, Any] = {}
+    # True only when passed=False AND the runner itself can tell retrying
+    # with the same inputs is guaranteed to fail the same way again (e.g.
+    # deploy_exec classifying a Vercel response as an invalid/rejected
+    # credential, not a transient error). The scheduler reads this off the
+    # resulting Attempt to skip straight to REQUEST_USER_INPUT instead of
+    # spending the task's retry budget on repeats of a failure that no
+    # retry could ever fix.
+    requires_user_input: bool = False
 
 
 @dataclass

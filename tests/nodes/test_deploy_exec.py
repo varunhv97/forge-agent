@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from forge.adapters.deploy.vercel_adapter import DeploymentResult, VercelDeploymentError
+from forge.adapters.deploy.vercel_adapter import (
+    DeploymentResult,
+    VercelAuthenticationError,
+    VercelDeploymentError,
+)
 from forge.controller.mechanical import MechanicalContext
 from forge.models.common import NodeKind
 from forge.models.graph import TaskSpec
@@ -89,7 +93,9 @@ def test_runner_fails_with_no_files(tmp_path: Path):
 def test_runner_succeeds_and_populates_outputs(tmp_path: Path):
     (tmp_path / "app.py").write_text("print('hi')\n")
     adapter = _FakeAdapter(
-        result=DeploymentResult(deployment_id="dep123", url="forge-abc.vercel.app", ready_state="READY")
+        result=DeploymentResult(
+            deployment_id="dep123", url="forge-abc.vercel.app", ready_state="READY"
+        )
     )
     runner = make_deploy_runner(adapter)
 
@@ -117,3 +123,16 @@ def test_runner_reports_failure_on_deployment_error(tmp_path: Path):
     assert result.passed is False
     assert "deployment failed" in result.summary
     assert "boom" in result.summary
+    assert result.requires_user_input is False
+
+
+def test_runner_flags_requires_user_input_on_credential_error(tmp_path: Path):
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    adapter = _FakeAdapter(error=VercelAuthenticationError(403, '{"error":{"invalidToken":true}}'))
+    runner = make_deploy_runner(adapter)
+
+    result = runner(_task(), MechanicalContext(worktree_path=str(tmp_path)))
+
+    assert result.passed is False
+    assert result.requires_user_input is True
+    assert "deployment failed" in result.summary

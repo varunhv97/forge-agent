@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from forge.adapters.deploy.vercel_adapter import (
     DeploymentFile,
+    VercelCredentialError,
     VercelDeployAdapter,
     VercelDeploymentError,
 )
@@ -15,6 +16,7 @@ from forge.controller.mechanical import MechanicalContext, MechanicalResult, Mec
 from forge.controller.node_registry import NodeType
 from forge.models.common import NodeKind
 from forge.models.graph import TaskSpec
+
 
 # Mirrors unit_verify_exec.py's MechanicalIO — deploy_exec's input has no
 # model-facing schema (it's mechanical), but its *output* is real: a
@@ -82,6 +84,13 @@ def make_deploy_runner(adapter: VercelDeployAdapter) -> MechanicalRunner:
         project_name = f"forge-{task.id}-{uuid.uuid4().hex[:8]}"
         try:
             result = adapter.deploy(project_name=project_name, files=files, target="production")
+        except VercelCredentialError as exc:
+            # No further attempt with the same token could succeed — flagged
+            # so the scheduler skips straight to REQUEST_USER_INPUT instead
+            # of spending this task's retry budget on guaranteed repeats.
+            return MechanicalResult(
+                passed=False, summary=f"deployment failed: {exc}", requires_user_input=True
+            )
         except VercelDeploymentError as exc:
             return MechanicalResult(passed=False, summary=f"deployment failed: {exc}")
 
