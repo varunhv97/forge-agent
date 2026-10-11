@@ -35,13 +35,22 @@ forge/
                           (mechanical nodes only so far — decision-driven
                           retry/escalate/revision is M3/M4)
   nodes/          one module per node type, each owning its own prompt,
-                  context-building, schemas, permission profile  (M2+)
+                  context-building, schemas, permission profile  (not yet)
   adapters/
-    execution/    sdk_execution_adapter.py (hook-enforced),
-                  codex_cli_adapter.py (container-enforced)      (M2/M5)
-    decision/     anthropic_api_decision_adapter.py              (M3)
-    deploy/       deploy_adapter_base.py, vercel_adapter.py       (M7)
-  isolation/      worktree_manager.py, hooks.py, docker_sandbox.py (M2/M5)
+    execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
+                  into real claude_agent_sdk types (ClaudeAgentOptions,
+                  HookMatcher); codex_cli_adapter.py (container-enforced,
+                  not yet — M5)
+    decision/     anthropic_api_decision_adapter.py              (not yet — M3)
+    deploy/       deploy_adapter_base.py, vercel_adapter.py       (not yet — M7)
+  isolation/
+    worktree_manager.py  create_worktree/remove_worktree over real git
+                          worktrees, idempotent cleanup
+    hooks.py              the PreToolUse policy decision engine itself
+                          (ToolCallEvent -> HookDecision) — zero dependency
+                          on any specific agent-runtime SDK by design
+    docker_sandbox.py     container isolation for non-hook-capable
+                          adapters (not yet — M5)
 ```
 
 ## Resumability
@@ -57,13 +66,25 @@ fresh attempt rather than waiting on one that will never report back.
 
 - Claude Agent SDK attempts: a PreToolUse hook, generated per attempt from
   the task's `PermissionProfile` and worktree path, is the actual boundary
-  — not the node's prompt.
+  — not the node's prompt. Built and real: `forge/isolation/hooks.py`
+  (the policy decision) wired into the real SDK's types by
+  `forge/adapters/execution/sdk_execution_adapter.py`. PreToolUse is the one
+  point in the SDK's permission pipeline that runs unconditionally, before
+  `permission_mode`/`allowed_tools` are even consulted — confirmed from the
+  SDK's own source and docstrings, not assumed.
 - Codex CLI attempts: no hook equivalent exists, so these always run inside
   a Docker container mounting only that attempt's worktree. The dispatcher
-  refuses to run a non-hook-capable adapter outside a container.
+  refuses to run a non-hook-capable adapter outside a container. Not built
+  yet (M5).
 - Either way: `STOP_SUCCESS` from a decision node is a recommendation only
   — the controller independently recomputes `all_required_gates_met()` from
   persisted `Evidence` rows before ever marking a run complete.
+
+**Known gap:** the SDK adapter's translation/construction logic is tested
+offline (no network); the live scenario of an actual model deciding to call
+a disallowed tool, and the real `claude` CLI subprocess invoking our hook
+callback, has not been run — this sandbox has no `ANTHROPIC_API_KEY` or
+authenticated `claude` CLI session. See `tasks.md`'s M2 entry.
 
 ## Status
 

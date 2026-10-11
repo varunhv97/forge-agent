@@ -15,14 +15,30 @@ exactly the pattern this project exists to prevent.
 
 ## Environment
 
-- This machine has no `pyinit`, `direnv`, `brew`, or `pyenv` — only system
-  `/usr/bin/python3` (3.9.6). Venv lives at `.venv/` (gitignored); activate
-  with `source .venv/bin/activate` before running anything.
-- Because we're on 3.9, every module using `X | Y` union syntax needs
-  `from __future__ import annotations` at the top. Don't drop it.
+- This machine has no `pyinit`, `direnv`, `brew`, or `pyenv`, and system
+  `python3` is 3.9.6 — too old for `claude-agent-sdk` (requires >=3.10).
+  `.venv/` therefore runs on a standalone CPython 3.11 build downloaded
+  into `.runtimes/python` (from `astral-sh/python-build-standalone`; both
+  `.runtimes/` and `.venv/` are gitignored). If either goes missing, rebuild
+  with:
+  ```
+  mkdir -p .runtimes && cd .runtimes && curl -sL -o py.tar.gz \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.11.16%2B20260924-aarch64-apple-darwin-install_only.tar.gz" \
+    && tar -xzf py.tar.gz && rm py.tar.gz && cd ..
+  .runtimes/python/bin/python3 -m venv .venv
+  source .venv/bin/activate && pip install -r requirements-dev.txt
+  ```
+- Every module using `X | Y` union syntax still needs
+  `from __future__ import annotations` at the top (harmless on 3.11, and
+  keeps the codebase consistent).
 - Install deps with `pip install -r requirements-dev.txt` inside the venv
   (not bare `pip3 install` against system Python).
 - Format with `black .`; run tests with `pytest`.
+- `gh` lives at `.gh-bin` with `GH_CONFIG_DIR=.gh-config` (both gitignored)
+  instead of the usual `~/.local/bin`/`~/.config/gh` — this tool's shell
+  cannot read or write the home directory at all, even with sandbox
+  overrides. The same restriction means `git push` must be run by the user
+  directly; never assume it can be done from here.
 
 ## Working agreement
 

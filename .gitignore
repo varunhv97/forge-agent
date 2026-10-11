@@ -10,3 +10,5 @@ forge.db-wal
 forge.db-shm
 artifacts/
 .DS_Store
+.runtimes/
+.claude/worktrees/
