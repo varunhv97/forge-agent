@@ -325,6 +325,68 @@ def test_propose_graph_revision_adds_a_task(
     assert new_graph.version == 2
 
 
+def test_propose_graph_revision_with_invalidated_evidence_supersedes_downstream(
+    store, request_factory, task_factory, graph_factory, node_registry, permission_registry
+):
+    """
+    A revision that explicitly invalidates evidence for t1 must: mark that
+    evidence row as invalidated, and supersede the latest PASSED attempt of
+    every downstream task that depended on it (here, t2) — not just t1
+    itself — so the scheduler treats the whole affected chain as needing
+    fresh verification rather than silently trusting stale work.
+    """
+    req = request_factory()
+    t1 = task_factory("t1")
+    t2 = task_factory("t2", depends_on=["t1"])
+    graph = graph_factory([t1, t2], version=1)
+    store.save_graph_version(graph)
+    run = _make_run(req, graph, store)
+
+    store.save_attempt(_attempt(task_id="t1", attempt_id="att-t1", status=AttemptStatus.PASSED))
+    store.save_attempt(_attempt(task_id="t2", attempt_id="att-t2", status=AttemptStatus.PASSED))
+    store.save_evidence(
+        Evidence(
+            id="ev-t1",
+            run_id=run.id,
+            attempt_id="att-t1",
+            task_id="t1",
+            kind="test_result",
+            passed=True,
+            commit_sha="",
+            raw_artifact_id="att-t1",
+            created_at=_now(),
+        )
+    )
+
+    revision = GraphRevisionProposal(
+        base_graph_version_id=graph.id,
+        rationale="t1's evidence turned out to be stale",
+        invalidated_evidence_ids=["ev-t1"],
+    )
+    proposal = _proposal(
+        DecisionAction.PROPOSE_GRAPH_REVISION, graph_revision=revision, target_task_ids=[]
+    )
+    apply_decision(
+        run,
+        graph,
+        req,
+        proposal,
+        store=store,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=_FakeModelRegistry(),
+        dispatch_retry=_RecordingDispatcher(),
+    )
+
+    reloaded_evidence = store.load_evidence(run.id)
+    ev_t1 = next(e for e in reloaded_evidence if e.id == "ev-t1")
+    assert ev_t1.invalidated_by_evidence_id == f"decision:{proposal.id}"
+
+    attempts_by_id = {a.id: a for a in store.load_attempts(run.id)}
+    assert attempts_by_id["att-t1"].status == AttemptStatus.SUPERSEDED
+    assert attempts_by_id["att-t2"].status == AttemptStatus.SUPERSEDED
+
+
 def test_propose_graph_revision_respects_budget(
     store, request_factory, task_factory, graph_factory
 ):

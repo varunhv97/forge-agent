@@ -6,7 +6,7 @@ from typing import Protocol
 from forge.controller.evidence_index import EvidenceIndex
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.store import Store
-from forge.controller.validator import compile_and_validate
+from forge.controller.validator import compile_and_validate, propagate_invalidation
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.decision import DecisionAction, DecisionProposal, GraphRevisionProposal
 from forge.models.graph import GraphVersion, TaskSpec
@@ -130,6 +130,50 @@ def check_revision_budget(request: Request, store: Store) -> None:
         )
 
 
+def _mark_invalidated_and_supersede(
+    store: Store,
+    run: Run,
+    new_graph: GraphVersion,
+    evidence_index: EvidenceIndex,
+    invalidated_evidence_ids: frozenset[str],
+    invalidated_by: str,
+) -> set[str]:
+    """
+    Marks the explicitly-invalidated evidence rows, derives every
+    downstream task whose dependency chain consumed that evidence
+    (`propagate_invalidation`), and for each of those tasks: invalidates
+    its own live evidence too (its PASSED result may have been produced
+    using the now-suspect upstream output, so it can't be trusted either),
+    and supersedes its latest PASSED attempt. A superseded attempt doesn't
+    block the scheduler's readiness check the way a PASSED one does, so
+    the task gets a fresh attempt on the next tick instead of stale work
+    being silently trusted — and with its evidence invalidated too, a
+    completion check can't quietly keep counting the old result either.
+    """
+    for evidence_id in invalidated_evidence_ids:
+        evidence = evidence_index.get(evidence_id)
+        if evidence is None:
+            continue
+        evidence.invalidated_by_evidence_id = invalidated_by
+        store.update_evidence(evidence)
+
+    affected_task_ids = propagate_invalidation(new_graph, evidence_index, invalidated_evidence_ids)
+
+    for task_id in affected_task_ids:
+        for evidence in evidence_index.for_task(task_id):
+            if evidence.invalidated_by_evidence_id is None:
+                evidence.invalidated_by_evidence_id = invalidated_by
+                store.update_evidence(evidence)
+
+    attempts = store.load_attempts(run.id)
+    for task_id in affected_task_ids:
+        attempt = _latest_attempt_for_task(attempts, task_id)
+        if attempt is not None and attempt.status == AttemptStatus.PASSED:
+            attempt.status = AttemptStatus.SUPERSEDED
+            store.update_attempt(attempt)
+    return affected_task_ids
+
+
 def _record_decision_trace(
     store: Store, run_id: str, proposal: DecisionProposal, outcome: str
 ) -> None:
@@ -241,6 +285,17 @@ def apply_decision(
         run.active_graph_version_id = new_version.id
         run.updated_at = _now()
         store.update_run(run)
+
+        if proposal.graph_revision.invalidated_evidence_ids:
+            _mark_invalidated_and_supersede(
+                store,
+                run,
+                new_version,
+                evidence_index,
+                frozenset(proposal.graph_revision.invalidated_evidence_ids),
+                invalidated_by=f"decision:{proposal.id}",
+            )
+
         _record_decision_trace(store, run.id, proposal, outcome="revised")
         return run
 

@@ -38,5 +38,11 @@ class Evidence(BaseModel):
     commit_sha: str  # exact revision this evidence concerns
     touched_paths: list[str] = []  # files the check actually covers
     raw_artifact_id: str
+    # What invalidated this evidence, if anything: either another
+    # evidence row's id (the automatic commit/touched-paths staleness
+    # rule), or "decision:<DecisionProposal.id>" when a graph revision
+    # explicitly invalidated it. Never both meanings mixed into one id —
+    # callers that need to resolve a real Evidence row should check for
+    # the "decision:" prefix first.
     invalidated_by_evidence_id: str | None = None
     created_at: datetime

@@ -36,6 +36,9 @@ forge/
                           becomes a real state change (see below)
     decision_dispatch.py  invoke_decision_node + deterministic fallbacks +
                           the fixed decision_node_type->model_id table
+    invalidation.py       evidence_is_stale — the commit/touched-paths
+                          staleness rule, real-git-tested; not yet wired
+                          into live dispatch (see Known gap below)
     scheduler.py          controller_tick / run_to_completion / reconcile;
                           failed tasks get driven through a decision each
                           tick instead of staying failed forever (mechanical
@@ -62,12 +65,12 @@ forge/
 
 ## Resumability
 
-Mechanical dispatch is synchronous: an attempt is written as `RUNNING`
-*before* it executes, then updated to `PASSED`/`FAILED` with its evidence
-in one transaction. Since this is a single-process execution model, any
-attempt still `RUNNING` when a run resumes was abandoned by a prior process
-— `reconcile_orphaned_attempts` cancels it so the scheduler dispatches a
-fresh attempt rather than waiting on one that will never report back.
+Mechanical dispatch is synchronous: an attempt is written `RUNNING` before
+it executes, then updated to `PASSED`/`FAILED` with its evidence in one
+transaction. Single-process execution model, so any attempt still
+`RUNNING` when a run resumes was abandoned by a prior process —
+`reconcile_orphaned_attempts` cancels it so the scheduler dispatches fresh
+rather than waiting on one that will never report back.
 
 ## Decisions, concretely
 
@@ -80,6 +83,19 @@ the prior failure verbatim; an escalation's model is checked against
 `ModelRegistry` before dispatch. Any decision-adapter failure falls back
 to a hand-written deterministic policy rather than hanging the run.
 
+## Invalidation, concretely
+
+A `PROPOSE_GRAPH_REVISION` that explicitly invalidates evidence doesn't
+stop at the named evidence: `propagate_invalidation` (validator.py) finds
+every downstream task whose dependency chain consumed it, and
+`apply_decision` invalidates *their* evidence too — not just the one named
+— and supersedes their latest attempt. A superseded attempt doesn't block
+`_ready_tasks` the way PASSED does, so the scheduler re-dispatches it on
+the next tick instead of a completion check quietly trusting stale work.
+The *automatic* version of this (a later commit's diff touching the same
+paths an older evidence row covered) is built and real-git-tested in
+`invalidation.py` but not wired into live dispatch yet (see Known gaps).
+
 ## Enforcement, concretely
 
 - Claude Agent SDK attempts: a PreToolUse hook, generated per attempt from
@@ -90,14 +106,16 @@ to a hand-written deterministic policy rather than hanging the run.
   point in the SDK's permission pipeline that runs unconditionally, before
   `permission_mode`/`allowed_tools` are even consulted — confirmed from the
   SDK's own source and docstrings, not assumed.
-- Codex CLI attempts: no hook equivalent exists, so these always run inside
-  a Docker container mounting only that attempt's worktree. The dispatcher
-  refuses to run a non-hook-capable adapter outside a container. Not built
-  yet (M5).
+- Codex CLI attempts (not built yet, M5): no hook equivalent exists, so
+  these always run inside a Docker container mounting only that attempt's
+  worktree; the dispatcher refuses to run a non-hook-capable adapter
+  outside one.
 
-**Known gap:** the live scenario (a model actually calling a disallowed
-tool, the real `claude` CLI invoking our hook) hasn't run — no API key in
-this sandbox. Everything else is tested offline. See `tasks.md`'s M2 entry.
+**Known gaps** (same shape, see `tasks.md` M2/M4 entries): the live
+model-tries-a-disallowed-tool scenario hasn't run (no API key in this
+sandbox); the commit-based automatic invalidation rule has no real commits
+to feed it yet (no EXECUTION-node dispatch until M6/M7). Both are built and
+tested offline/against real git — just not exercised by a live run.
 
 ## Status
 

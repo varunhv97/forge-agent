@@ -43,7 +43,29 @@ messages, not here — this stays a living index, not an archive.
       itself — `propagate_invalidation` and the commit/touched-paths-based
       automatic evidence-invalidation rule aren't wired into real scheduler
       behavior yet.
-- [ ] **M4** — graph revision + invalidation propagation
+- [x] **M4 — Graph revision + invalidation propagation.**
+      `forge/controller/invalidation.py` — `evidence_is_stale`/
+      `compute_stale_evidence_ids`, the commit/touched-paths-based
+      automatic staleness rule, tested against real git repos (built via
+      parallel subagent). **Known gap, same pattern as M2:** not wired into
+      the live scheduler — mechanical nodes don't produce real commits yet
+      (that needs EXECUTION-node dispatch, M6/M7), so this stays a
+      correct, tested, standalone unit until there's real commit data to
+      feed it.
+      What *is* wired live (mine): `apply_decision`'s `PROPOSE_GRAPH_REVISION`
+      path now calls `propagate_invalidation` for real — explicitly
+      invalidated evidence propagates to every downstream task that
+      depended on it, invalidating *their* evidence too (not just the
+      named evidence) and superseding their latest attempt, so the
+      scheduler re-dispatches them instead of silently trusting stale
+      work. Added `Store.update_evidence`. Fixed a related bug:
+      `_ready_tasks` had the same "ever vs. latest" mistake M3 fixed in
+      `_has_unrecoverable_failure` — a task whose only attempt was
+      superseded could still get stuck behind an old FAILED attempt
+      earlier in its history. 12 new tests, including a full
+      run-completes → evidence-invalidated → re-dispatched →
+      re-completes-on-fresh-evidence scheduler test.
+- [ ] **M5** — Codex CLI adapter + Docker-sandbox isolation
 - [ ] **M5** — Codex CLI adapter + Docker-sandbox isolation
 - [ ] **M6** — three-tier testing nodes (`integration_test_write_exec`, `manual_test_exec`)
 - [ ] **M7** — Feature Blast end-to-end with a real Vercel deployment (flagship milestone)

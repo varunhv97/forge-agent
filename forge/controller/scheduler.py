@@ -103,9 +103,7 @@ def reconcile_orphaned_attempts(store: Store, run_id: str) -> int:
 
 
 def _ready_tasks(graph: GraphVersion, attempts: list[Attempt]) -> list[TaskSpec]:
-    attempts_by_task: dict[str, list[Attempt]] = {}
-    for a in attempts:
-        attempts_by_task.setdefault(a.task_id, []).append(a)
+    latest_by_task = _latest_attempt_per_task(attempts)
 
     ready: list[TaskSpec] = []
     for task in graph.tasks:
@@ -115,14 +113,24 @@ def _ready_tasks(graph: GraphVersion, attempts: list[Attempt]) -> list[TaskSpec]
             # is wired in, a non-mechanical task simply never becomes ready
             # — it stalls the run rather than being silently skipped.
             continue
-        existing = attempts_by_task.get(task.id, [])
-        if any(a.status in (AttemptStatus.RUNNING, AttemptStatus.PASSED) for a in existing):
-            continue
-        if any(a.status == AttemptStatus.FAILED for a in existing):
-            # A failed task is never silently re-dispatched by this generic
-            # readiness check — the only path back to running is an
-            # explicit RETRY_WITH_FEEDBACK/ESCALATE_MODEL decision, handled
-            # separately in _resolve_failed_tasks.
+        current = latest_by_task.get(task.id)
+        if current is not None and current.status in (
+            AttemptStatus.RUNNING,
+            AttemptStatus.PASSED,
+            AttemptStatus.FAILED,
+        ):
+            # RUNNING/PASSED: already in flight or done. FAILED: never
+            # silently re-dispatched here — only an explicit decision
+            # (handled in _resolve_failed_tasks) can retry it. A CANCELLED
+            # or SUPERSEDED latest attempt, by contrast, leaves the task
+            # eligible again: CANCELLED means a prior attempt was orphaned
+            # by a crash and never really ran; SUPERSEDED means its
+            # evidence no longer counts, so the task needs a fresh attempt
+            # just as much as if it had never run at all. Checking only the
+            # *latest* attempt (not "has any attempt ever had status X")
+            # matters here — a task's history can contain an old FAILED
+            # attempt followed by a PASSED-then-SUPERSEDED one, and it's
+            # the latest status that determines what happens next.
             continue
         if all(
             any(a.task_id == dep and a.status == AttemptStatus.PASSED for a in attempts)

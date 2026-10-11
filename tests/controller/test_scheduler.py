@@ -359,3 +359,120 @@ def test_decision_fn_failure_falls_back_cleanly(
 
     assert result.status == RunStatus.COMPLETED_VERIFIED
     assert len(store.load_attempts(run.id)) == 2  # fallback retried once, then it passed
+
+
+# --- M4: graph-revision-driven invalidation re-triggers verification -----
+
+
+def test_invalidated_evidence_causes_fresh_re_verification(
+    store: Store, request_factory, task_factory, graph_factory, permission_registry
+):
+    """
+    End-to-end: a run completes normally, then a decision explicitly
+    invalidates the evidence behind one of its gates. The task (and its
+    downstream dependent) must be driven through a fresh attempt on the
+    next tick rather than the run trusting the now-stale PASSED attempt —
+    and completion must be re-derived from the *new* evidence, not the
+    invalidated one.
+    """
+    from tests.conftest import make_node_type
+
+    from forge.controller.decisions import apply_decision
+    from forge.controller.node_registry import NodeTypeRegistry
+    from forge.models.decision import DecisionProposal, GraphRevisionProposal
+
+    node_registry = NodeTypeRegistry()
+    node_registry.register(
+        make_node_type("shell_ok", kind=NodeKind.MECHANICAL, produces_gate_evidence=True)
+    )
+
+    c1 = AcceptanceCriterion(id="c1", description="x", verification_method="mechanical_check")
+    c2 = AcceptanceCriterion(id="c2", description="y", verification_method="mechanical_check")
+    req = request_factory(acceptance_criteria=[c1, c2])
+    t1 = task_factory(
+        "t1", node_type="shell_ok", node_kind=NodeKind.MECHANICAL, acceptance_criterion_ids=["c1"]
+    )
+    t2 = task_factory(
+        "t2",
+        node_type="shell_ok",
+        node_kind=NodeKind.MECHANICAL,
+        depends_on=["t1"],
+        acceptance_criterion_ids=["c2"],
+    )
+    graph = graph_factory([t1, t2])
+    deps = ControllerDependencies(mechanical_registry=_mechanical_registry())
+
+    run = start_run(req, graph, store)
+    first_result = run_to_completion(run.id, store, deps)
+    assert first_result.status == RunStatus.COMPLETED_VERIFIED
+
+    original_t1_evidence = next(
+        e
+        for e in store.load_evidence(run.id)
+        if e.task_id == "t1" and e.acceptance_criterion_id == "c1"
+    )
+    run = store.load_run(run.id)
+    run.status = RunStatus.ACTIVE  # reopen, as if a decision node re-examined a completed run
+    store.update_run(run)
+
+    revision = GraphRevisionProposal(
+        base_graph_version_id=graph.id,
+        rationale="t1's prior verification turned out to be unreliable",
+        invalidated_evidence_ids=[original_t1_evidence.id],
+    )
+    proposal = DecisionProposal(
+        id="dec-invalidate-1",
+        decision_node_type="review_decision",
+        action=DecisionAction.PROPOSE_GRAPH_REVISION,
+        graph_revision=revision,
+        confidence=0.8,
+        evidence_refs=["manual-review"],
+        model_used="test-model",
+        created_at=datetime.now(timezone.utc),
+    )
+    active_graph = store.load_graph_version(run.active_graph_version_id)
+    apply_decision(
+        run,
+        active_graph,
+        req,
+        proposal,
+        store=store,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=None,  # not needed for PROPOSE_GRAPH_REVISION
+        dispatch_retry=None,  # not needed for PROPOSE_GRAPH_REVISION
+    )
+
+    # t1 and t2 are superseded, not re-dispatched yet
+    attempts_by_task = {}
+    for a in store.load_attempts(run.id):
+        attempts_by_task.setdefault(a.task_id, []).append(a)
+    assert (
+        max(attempts_by_task["t1"], key=lambda a: a.attempt_number).status
+        == AttemptStatus.SUPERSEDED
+    )
+    assert (
+        max(attempts_by_task["t2"], key=lambda a: a.attempt_number).status
+        == AttemptStatus.SUPERSEDED
+    )
+
+    second_result = run_to_completion(run.id, store, deps)
+    assert second_result.status == RunStatus.COMPLETED_VERIFIED
+
+    final_attempts = {}
+    for a in store.load_attempts(run.id):
+        final_attempts.setdefault(a.task_id, []).append(a)
+    # both tasks got a brand new attempt beyond the superseded one
+    assert len(final_attempts["t1"]) == 2
+    assert len(final_attempts["t2"]) == 2
+    assert max(final_attempts["t1"], key=lambda a: a.attempt_number).status == AttemptStatus.PASSED
+
+    live_t1_evidence = [
+        e
+        for e in store.load_evidence(run.id)
+        if e.task_id == "t1"
+        and e.acceptance_criterion_id == "c1"
+        and e.invalidated_by_evidence_id is None
+    ]
+    assert len(live_t1_evidence) == 1
+    assert live_t1_evidence[0].id != original_t1_evidence.id

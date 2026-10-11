@@ -176,6 +176,21 @@ class Store:
         ).fetchall()
         return [Evidence.model_validate_json(r["data"]) for r in rows]
 
+    def update_evidence(self, evidence: Evidence) -> None:
+        """
+        Overwrites an existing evidence row — used to set
+        `invalidated_by_evidence_id` once something (a graph revision's
+        explicit invalidation, or later, the commit-based staleness check)
+        determines it should no longer count toward a completion gate.
+        """
+        with transaction(self._conn) as conn:
+            cursor = conn.execute(
+                "UPDATE evidence SET data = ? WHERE id = ?",
+                (evidence.model_dump_json(), evidence.id),
+            )
+            if cursor.rowcount == 0:
+                raise NotFoundError(f"evidence '{evidence.id}' not found")
+
     # -- trace events ---------------------------------------------------------
 
     def append_trace_event(self, event: TraceEvent) -> None:
