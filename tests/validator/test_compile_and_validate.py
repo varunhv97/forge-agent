@@ -13,6 +13,7 @@ from forge.models.request import AcceptanceCriterion
 def _passed_attempt(task_id: str, attempt_id: str = "a1") -> Attempt:
     return Attempt(
         id=attempt_id,
+        run_id="run-1",
         task_id=task_id,
         graph_version_id="gv-1",
         attempt_number=1,
@@ -29,6 +30,7 @@ def _passed_attempt(task_id: str, attempt_id: str = "a1") -> Attempt:
 def _evidence(task_id: str, evidence_id: str = "e1") -> Evidence:
     return Evidence(
         id=evidence_id,
+        run_id="run-1",
         attempt_id="a1",
         task_id=task_id,
         kind="test_result",
@@ -39,7 +41,7 @@ def _evidence(task_id: str, evidence_id: str = "e1") -> Evidence:
     )
 
 
-# --- 1. Structural -----------------------------------------------------
+# --- Structural soundness ------------------------------------------------
 
 
 def test_minimal_valid_graph_compiles(
@@ -84,7 +86,7 @@ def test_depends_on_without_matching_edge_rejected(
 def test_cycle_is_rejected(
     node_registry, permission_registry, request_factory, task_factory, graph_factory
 ):
-    """plan §10 test #5"""
+    """A revision cannot introduce a cycle, however indirectly."""
     t1 = task_factory("t1", depends_on=["t2"])
     t2 = task_factory("t2", depends_on=["t1"])
     graph = graph_factory([t1, t2])
@@ -101,7 +103,7 @@ def test_self_dependency_cycle_is_rejected(
         compile_and_validate(graph, request_factory(), node_registry, permission_registry)
 
 
-# --- 2. Type validity ----------------------------------------------------
+# --- Node type validity ---------------------------------------------------
 
 
 def test_unknown_node_type_rejected(
@@ -125,7 +127,7 @@ def test_node_kind_mismatch_rejected(
         compile_and_validate(graph, request_factory(), node_registry, permission_registry)
 
 
-# --- 3. Dependency/input compatibility ----------------------------------
+# --- Dependency/input compatibility ---------------------------------------
 
 
 def test_missing_required_upstream_node_type_rejected(
@@ -158,7 +160,7 @@ def test_satisfied_required_upstream_node_type_compiles(
     assert compiled.status == "active"
 
 
-# --- 4. Required completion gates ---------------------------------------
+# --- Required completion gates ---------------------------------------------
 
 
 def test_required_criterion_with_no_covering_task_rejected(
@@ -204,7 +206,7 @@ def test_optional_criterion_does_not_require_coverage(
     assert compiled.status == "active"
 
 
-# --- 5. No retroactive invalidation (plan §10 test #2) -------------------
+# --- No retroactive invalidation of completed required work -------------
 
 
 def test_revision_altering_passed_task_without_invalidation_rejected(
@@ -289,7 +291,7 @@ def test_revision_altering_task_with_no_passed_attempt_needs_no_invalidation(
     assert compiled.version == 2
 
 
-# --- 6. Permission ceilings ----------------------------------------------
+# --- Permission ceilings ---------------------------------------------------
 
 
 def test_network_profile_without_deploy_authorization_rejected(

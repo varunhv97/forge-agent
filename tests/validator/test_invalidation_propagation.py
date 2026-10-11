@@ -10,6 +10,7 @@ from forge.models.evidence import Evidence
 def _evidence(task_id: str, evidence_id: str) -> Evidence:
     return Evidence(
         id=evidence_id,
+        run_id="run-1",
         attempt_id="a1",
         task_id=task_id,
         kind="test_result",

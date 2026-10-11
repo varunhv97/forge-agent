@@ -27,6 +27,7 @@ class Finding(BaseModel):
 
 class Evidence(BaseModel):
     id: str
+    run_id: str
     attempt_id: str
     task_id: str
     acceptance_criterion_id: str | None = None

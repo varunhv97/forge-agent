@@ -11,4 +11,5 @@ class NodeKind(str, Enum):
 
 class Mode(str, Enum):
     FEATURE_BLAST = "feature_blast"
-    # more added here as each future mode (plan §2.2) actually gets built
+    # New modes are added here only once they're actually designed and
+    # built — this enum should never list a mode with no template behind it.

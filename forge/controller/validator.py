@@ -77,10 +77,11 @@ def _check_node_types_valid(draft: GraphVersion, registry: NodeTypeRegistry) -> 
 
 def _check_dependency_compatibility(draft: GraphVersion, registry: NodeTypeRegistry) -> None:
     """
-    A deliberately simpler, concrete stand-in for the plan's
-    `input_schema.is_satisfiable_from(upstream_outputs)` pseudocode: a task's
-    required upstream node TYPES (declared on its NodeType) must actually
-    appear among its depends_on.
+    Verifies that a task's required upstream node types are actually present
+    among its dependencies. This is a conservative, name-based check rather
+    than full schema unification: a task declares which upstream node TYPES
+    it needs (via NodeType.required_upstream_node_types), and this fails
+    closed if none of its dependencies are of that type.
     """
     task_by_id = {t.id: t for t in draft.tasks}
     for t in draft.tasks:
@@ -188,36 +189,34 @@ def compile_and_validate(
 ) -> GraphVersion:
     """
     The single enforcement point for graph structure. Every caller — a mode
-    template building graph v1, or a decision node's constrained-generation
-    revision — goes through this exact function. There is no looser path
-    for generated graphs (plan §4).
+    template building the initial graph, or a decision node's proposed
+    revision — goes through this exact function. There is no looser
+    validation path for generated graphs; a revision that fails any of
+    these checks is rejected outright, regardless of its source.
+
+    Raises GraphValidationError on the first violated invariant:
+      - structural soundness (unique ids, valid edges, acyclicity)
+      - every task's node_type is registered and kind-compatible
+      - every task's required upstream node types are actually dependencies
+      - every required acceptance criterion is covered by a gate-producing task
+      - no revision silently invalidates already-PASSED required work
+      - every task's permission profile respects the request's ceilings
     """
     completed_attempts = completed_attempts or []
     evidence_index = evidence_index if evidence_index is not None else EvidenceIndex()
 
-    # 1. Structural
     _check_unique_ids(draft.tasks)
     _check_edges_reference_existing_tasks(draft)
     _check_depends_on_matches_edges(draft)
     g = _build_digraph(draft)
     _check_acyclic(g)
 
-    # 2. Type validity
     _check_node_types_valid(draft, node_registry)
-
-    # 3. Dependency/input compatibility
     _check_dependency_compatibility(draft, node_registry)
-
-    # 4. Required completion gates preserved
     _check_all_required_criteria_covered(draft, request, node_registry)
-
-    # 5. No retroactive invalidation of completed required work without
-    #    explicit evidence invalidation
     _check_no_silent_invalidation(
         draft, prior_version, completed_attempts, evidence_index, invalidated_evidence_ids
     )
-
-    # 6. Permission/budget ceilings
     _check_permission_ceilings(draft, request, permission_registry)
 
     compiled = draft.model_copy(
@@ -235,9 +234,9 @@ def propagate_invalidation(
     """
     Given explicitly invalidated evidence ids, return every downstream task
     id whose dependency chain consumed that evidence — these need
-    PENDING_REVERIFICATION, not silent trust that upstream work still holds.
-    Pure/derived (plan §4 point 7); callers (the scheduler, from M1 onward)
-    are responsible for actually marking attempts SUPERSEDED from this set.
+    re-verification, not silent trust that upstream work still holds. This
+    is a pure derivation; the caller is responsible for actually marking
+    those tasks' attempts superseded.
     """
     if not invalidated_evidence_ids:
         return set()

@@ -11,8 +11,9 @@ class PermissionProfile(BaseModel):
     )
     path_globs_allowed: list[str] = Field(default_factory=list)
     network_allowed: bool = False
-    # requires_docker is derived from which adapter runs the task (plan §6.4),
-    # not declared here — a profile doesn't know which runtime will use it.
+    # Container isolation is derived from which execution adapter runs the
+    # task, not declared here — a profile doesn't know which runtime will
+    # use it.
 
 
 class Budgets(BaseModel):

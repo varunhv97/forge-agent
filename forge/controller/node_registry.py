@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Type
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from forge.models.common import NodeKind
 from forge.models.permissions import PermissionProfile
@@ -10,12 +10,11 @@ from forge.models.permissions import PermissionProfile
 
 class NodeType(BaseModel):
     """
-    One entry per node type (plan §6.1) — global and mode-agnostic. A mode's
-    template function only ever references these by name; it never defines
-    its own.
+    One entry per node type, global and mode-agnostic. A mode's template
+    function only ever references these by name; it never defines its own.
     """
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
     kind: NodeKind
@@ -23,10 +22,9 @@ class NodeType(BaseModel):
     output_schema: Type[BaseModel]
     permission_profile: str
     # Which upstream node TYPES must appear among a task's depends_on for its
-    # input to be satisfiable. This is a deliberately simpler, concrete
-    # stand-in for the plan's `input_schema.is_satisfiable_from(...)`
-    # pseudocode — real enough to fail closed on a genuinely missing
-    # dependency, without inventing a fragile schema-matching heuristic.
+    # input to be satisfiable. A conservative, name-based check rather than
+    # full schema unification — it fails closed on a genuinely missing
+    # dependency without requiring a fragile field-matching heuristic.
     required_upstream_node_types: frozenset[str] = frozenset()
     produces_gate_evidence: bool = False
     default_model: str | None = None

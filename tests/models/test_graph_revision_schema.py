@@ -5,13 +5,12 @@ from forge.models.decision import GraphRevisionProposal
 
 def test_graph_revision_proposal_cannot_mutate_permission_profile():
     """
-    plan §10 test #3: self-granted permission escalation must be
-    structurally impossible, not merely policy-denied. Assert via schema
-    introspection that no field on GraphRevisionProposal (or on the
-    TaskSpec it's allowed to add) can change an *existing* task's
-    permission_profile, budgets, or acceptance criteria — the only way to
-    affect those is add_tasks (whole new tasks) and remove_task_ids, never
-    an in-place mutation of something already in the graph.
+    Self-granted permission escalation must be structurally impossible, not
+    merely policy-denied. Assert via schema introspection that no field on
+    GraphRevisionProposal can change an *existing* task's permission_profile,
+    budgets, or acceptance criteria — the only way to affect the graph is
+    add_tasks (whole new tasks) and remove_task_ids, never an in-place
+    mutation of something already in it.
     """
     fields = set(GraphRevisionProposal.model_fields.keys())
     assert fields == {

@@ -19,6 +19,7 @@ class AttemptStatus(str, Enum):
 
 class Attempt(BaseModel):
     id: str
+    run_id: str
     task_id: str
     graph_version_id: str
     attempt_number: int

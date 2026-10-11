@@ -27,7 +27,7 @@ exactly the pattern this project exists to prevent.
 ## Working agreement
 
 - Build iteratively: v1 = core engine + Feature Blast mode only. Every other
-  mode is a backlog entry (plan §2.2) — do not build one without discussing
+  mode is a backlog entry — do not build one without discussing
   it with the user first.
 - Node types live in one global registry (`forge/controller/node_registry.py`)
   shared across modes — never give a mode its own private node type when an
