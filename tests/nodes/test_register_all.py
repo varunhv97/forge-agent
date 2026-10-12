@@ -33,8 +33,8 @@ def test_register_all_populates_permission_registry():
 
     assert code_edit.network_allowed is False
     assert manual_test.network_allowed is True
-    assert "Bash(npx*)" in manual_test.allowed_tools
-    assert "Bash" not in manual_test.allowed_tools
+    assert "Write" in manual_test.allowed_tools
+    assert "Bash" in manual_test.allowed_tools
     assert deploy.network_allowed is True
 
 

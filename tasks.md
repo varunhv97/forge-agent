@@ -191,9 +191,30 @@ messages, not here — this stays a living index, not an archive.
       `PATCH /v9/projects/{name}` with `{"ssoProtection": null}` right
       after creating the deployment, disabling protection on the project so
       it's actually reachable without a human logging in — which is the
-      whole point of `deploy_exec` existing. 229 tests. **Still not yet
-      confirmed fully green end-to-end** — needs the user to re-run
-      `scripts/live_feature_blast_m7.py` once more from their own terminal.
+      whole point of `deploy_exec` existing.
+
+      **Fourth live run:** `implement_exec`, `unit_verify_exec`,
+      `deploy_exec` all passed again, and — the strongest signal yet — the
+      independent probe (a check outside the run entirely, never trusting
+      the run's own status) got back the real app response:
+      `{"message": "hello, Forge!"}`. `manual_test_exec` itself still
+      failed 3x, but with a root cause that's now understood precisely:
+      its permission profile (`manual_test_default`) had no `"Write"` tool
+      at all, despite the node's own prompt requiring it to write
+      `.forge_result.json` — every write attempt was denied outright. Worse,
+      its `Bash(<glob>)` entries are matched against the *entire* command
+      string (`hooks.py`'s `_tool_covered_by_allowlist`), so any compound
+      command (`cd ... && pip install playwright`, `mkdir -p screenshots`,
+      a plain `python3 script.py`) was denied regardless of prefix — there
+      was no real way to install or drive a test runner at all, scoped
+      patterns or not. Fixed: `MANUAL_TEST_DEFAULT` now grants
+      `["Read", "Write", "Bash"]` (unscoped Bash) — `denied_bash_patterns`'s
+      own default (`git push*`/`*vercel deploy*`/`curl *`/`rm -rf *`) is
+      still the real backstop, same as it always was; the old narrow
+      allowlist was never actually enforcing anything tighter than that in
+      practice, just blocking legitimate compound commands. 229 tests.
+      **Still not yet confirmed fully green end-to-end** — needs the user
+      to re-run `scripts/live_feature_blast_m7.py` once more.
 - [ ] **M8** — CLI polish + `forge trace`/`forge inspect`
 
 Everything past M8 (other modes, a third adapter, dashboard) is backlog —

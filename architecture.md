@@ -170,6 +170,18 @@ starting over.
   container is supplied; there is no configuration path around this.
   `run_codex_in_sandbox` owns the full lifecycle and guarantees
   `stop_container` runs even when the attempt itself fails.
+- `Bash(<glob>)` allowlist entries in a `PermissionProfile` match against
+  the *entire* command string (`hooks.py::_tool_covered_by_allowlist`,
+  `fnmatch` with no implicit wildcard), not just a leading token — a
+  narrowly-scoped pattern like `Bash(npx*)` denies any compound command
+  (`cd ... && npx ...`, `mkdir -p ... && npx ...`) regardless of what
+  follows the `&&`. A live M7 run surfaced this concretely: discovered
+  when `manual_test_default`'s original narrow allowlist denied nearly
+  every tool call `manual_test_exec` attempted. `denied_bash_patterns`
+  (`git push*`/`*vercel deploy*`/`curl *`/`rm -rf *`, every profile's
+  default) is the actual intended backstop for a profile that needs real
+  shell flexibility — a narrow `allowed_tools` glob is not a substitute
+  for it and can silently block legitimate work instead.
 
 ## M7 descoped slice, concretely
 

@@ -35,14 +35,22 @@ CODE_EDIT_DEFAULT = PermissionProfile(
 )
 
 # manual_test_exec is the first node type in this project with network
-# access. It is scoped to only what driving a Playwright script needs —
-# reading files and invoking Playwright through npx — not a blanket Bash
-# allowance. `denied_bash_patterns` is left at PermissionProfile's own
-# default, which still blocks `curl *` even though `network_allowed=True`
-# permits the Playwright browser itself to reach the target URL.
+# access. A live M7 run showed the original narrow allowlist
+# (["Read", "Bash(playwright*)", "Bash(npx playwright*)", "Bash(npx*)"], no
+# "Write" at all) was unworkable in practice: the node's own prompt
+# requires writing `.forge_result.json` — a tool call the old list could
+# never permit — and `Bash(<glob>)` is matched against the *entire* command
+# string (see hooks.py's _tool_covered_by_allowlist), so any compound
+# command (`cd ... && pip install playwright`, `mkdir -p screenshots`, a
+# plain `python3 script.py`) was denied outright regardless of prefix,
+# leaving no real way to install or drive a test runner at all. "Bash"
+# unscoped is the fix; `denied_bash_patterns`'s own default
+# ("git push*"/"*vercel deploy*"/"curl *"/"rm -rf *") is still the backstop
+# — this node still can't push, deploy, curl, or rm -rf, and still can't
+# reach the network at all if network_allowed were False.
 MANUAL_TEST_DEFAULT = PermissionProfile(
     name="manual_test_default",
-    allowed_tools=["Read", "Bash(playwright*)", "Bash(npx playwright*)", "Bash(npx*)"],
+    allowed_tools=["Read", "Write", "Bash"],
     network_allowed=True,
 )
 
