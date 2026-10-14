@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 
 class ContainerRequiredError(RuntimeError):
@@ -42,10 +42,12 @@ class ContainerExecResult(Protocol):
     stderr: str
 
 
+ContainerT = TypeVar("ContainerT", bound=ContainerHandle)
+
 # Callable[[container_handle, command_argv, cwd], exec_result]. The caller
 # wires in the real container-exec implementation; this module never
 # imports it.
-ContainerExecutor = Callable[[Any, list[str], str], Any]
+ContainerExecutor = Callable[[ContainerT, list[str], str], ContainerExecResult]
 
 
 @dataclass
@@ -173,8 +175,8 @@ def run_codex_attempt(
     *,
     prompt: str,
     model: str,
-    container: Any,
-    exec_in_container: ContainerExecutor,
+    container: ContainerT | None,
+    exec_in_container: ContainerExecutor[ContainerT],
     cwd: str = "/workspace",
 ) -> CodexExecutionResult:
     """

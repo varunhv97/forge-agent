@@ -85,8 +85,8 @@ def _load_env_local() -> None:
     """
     if not ENV_LOCAL_PATH.exists():
         return
-    for line in ENV_LOCAL_PATH.read_text().splitlines():
-        line = line.strip()
+    for raw_line in ENV_LOCAL_PATH.read_text().splitlines():
+        line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
@@ -152,7 +152,8 @@ def probe_deployed_journey(base_url: str) -> tuple[bool, str]:
     """
     url = f"{base_url}/api/greet?name=Forge"
     try:
-        with urllib.request.urlopen(url, timeout=15) as response:
+        # The only caller passes base_url = f"https://{deployment_url}".
+        with urllib.request.urlopen(url, timeout=15) as response:  # noqa: S310
             body = response.read().decode()
     except urllib.error.URLError as exc:
         return False, f"request to {url} failed: {exc}"

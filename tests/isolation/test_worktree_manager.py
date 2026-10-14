@@ -17,6 +17,7 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,
+        check=False,
         text=True,
     )
     assert result.returncode == 0, f"git {args} failed: {result.stderr}"

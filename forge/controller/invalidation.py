@@ -23,6 +23,7 @@ def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[st
         return subprocess.run(
             ["git", "-C", str(repo_root), *args],
             capture_output=True,
+            check=False,
             text=True,
         )
     except OSError as exc:

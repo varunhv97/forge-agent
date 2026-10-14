@@ -29,7 +29,7 @@ def run_sdk_node(
                 model=model,
             )
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any adapter failure is a failed attempt, by contract
         return ExecutionRunOutcome(completed=False, summary=f"SDK execution failed: {exc}")
 
     summary = f"session completed with {len(result.messages)} message(s)"

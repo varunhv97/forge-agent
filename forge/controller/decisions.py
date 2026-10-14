@@ -212,7 +212,7 @@ def _record_decision_trace(
     )
 
 
-def apply_decision(
+def apply_decision(  # noqa: PLR0912, PLR0915 - one branch per DecisionAction
     run: Run,
     graph: GraphVersion,
     request: Request,
@@ -330,7 +330,7 @@ def apply_decision(
         # (for apply_decision), so importing it back at module load time
         # here would be circular. Importing it lazily, only when this
         # branch actually runs, breaks the cycle.
-        from forge.controller.scheduler import all_required_gates_met
+        from forge.controller.scheduler import all_required_gates_met  # noqa: PLC0415
 
         evidence = store.load_evidence(run.id)
         if all_required_gates_met(graph, request, evidence):

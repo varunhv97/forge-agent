@@ -46,7 +46,8 @@ def test_full_lifecycle_launches_execs_and_stops():
 
     assert exec_call[:2] == ["docker", "exec"]
     assert "container-abc123" in exec_call
-    assert "codex" in exec_call and "exec" in exec_call  # the inner codex command
+    assert "codex" in exec_call
+    assert "exec" in exec_call
     assert "--" in exec_call  # the prompt separator survived the full round trip
 
     assert stop_call == ["docker", "stop", "container-abc123"]

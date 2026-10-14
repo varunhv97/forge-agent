@@ -71,6 +71,7 @@ def _run_docker(args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["docker", *args],
             capture_output=True,
+            check=False,
             text=True,
         )
     except OSError as exc:

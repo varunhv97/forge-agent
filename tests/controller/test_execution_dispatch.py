@@ -19,7 +19,9 @@ from forge.nodes import register_all
 
 
 def _git(repo: Path, *args: str) -> None:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, check=False, text=True
+    )
     assert result.returncode == 0, result.stderr
 
 

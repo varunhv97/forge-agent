@@ -97,6 +97,7 @@ def make_shell_runner(command: list[str], timeout_seconds: float = 60.0) -> Mech
             result = subprocess.run(
                 command,
                 capture_output=True,
+                check=False,
                 text=True,
                 timeout=timeout_seconds,
                 cwd=context.worktree_path,

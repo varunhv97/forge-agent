@@ -46,7 +46,7 @@ def test_double_registration_raises():
     registry = ExecutionHandlerRegistry()
     handlers = ExecutionNodeHandlers(build_input=_build_input, build_prompt=_build_prompt)
     registry.register("implement_exec", handlers)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="already registered"):
         registry.register("implement_exec", handlers)
 
 

@@ -12,7 +12,7 @@ import httpx
 VERCEL_API_BASE_URL = "https://api.vercel.com"
 VERCEL_DEPLOYMENTS_URL = f"{VERCEL_API_BASE_URL}/v13/deployments"
 VERCEL_PROJECTS_URL = f"{VERCEL_API_BASE_URL}/v9/projects"
-VERCEL_TOKEN_ENV_VAR = "VERCEL_TOKEN"
+VERCEL_TOKEN_ENV_VAR = "VERCEL_TOKEN"  # noqa: S105 - an env var name, not a secret
 
 # `readyState` values that mean the deployment has finished, one way or
 # another. Anything else (QUEUED, BUILDING, INITIALIZING, ANALYZING, and any

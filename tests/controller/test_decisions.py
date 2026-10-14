@@ -60,16 +60,16 @@ def _attempt(
 
 
 def _proposal(action, **overrides) -> DecisionProposal:
-    defaults = dict(
-        id="dec-1",
-        decision_node_type="retry_or_escalate_policy",
-        action=action,
-        target_task_ids=["t1"],
-        evidence_refs=["ev-1"],
-        confidence=0.5,
-        model_used="test-model",
-        created_at=_now(),
-    )
+    defaults = {
+        "id": "dec-1",
+        "decision_node_type": "retry_or_escalate_policy",
+        "action": action,
+        "target_task_ids": ["t1"],
+        "evidence_refs": ["ev-1"],
+        "confidence": 0.5,
+        "model_used": "test-model",
+        "created_at": _now(),
+    }
     defaults.update(overrides)
     return DecisionProposal(**defaults)
 
@@ -94,12 +94,12 @@ class _RecordingDispatcher:
         self, task, run, *, model_used, retries_from_attempt_id, escalated_from_attempt_id
     ):
         self.calls.append(
-            dict(
-                task_id=task.id,
-                model_used=model_used,
-                retries_from_attempt_id=retries_from_attempt_id,
-                escalated_from_attempt_id=escalated_from_attempt_id,
-            )
+            {
+                "task_id": task.id,
+                "model_used": model_used,
+                "retries_from_attempt_id": retries_from_attempt_id,
+                "escalated_from_attempt_id": escalated_from_attempt_id,
+            }
         )
 
 

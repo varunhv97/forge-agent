@@ -13,7 +13,9 @@ from forge.controller.attempt_commit import (
 
 
 def _git(repo: Path, *args: str) -> None:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, check=False, text=True
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -32,7 +34,7 @@ def repo(tmp_path: Path) -> Path:
 
 def test_current_head_matches_real_commit(repo: Path):
     expected = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, check=False, text=True
     ).stdout.strip()
     assert current_head(repo) == expected
 

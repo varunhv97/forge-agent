@@ -99,9 +99,11 @@ def test_launch_container_builds_expected_args_with_network_allowed(tmp_path: Pa
 
 
 def test_launch_container_raises_docker_unavailable_when_binary_missing(tmp_path: Path) -> None:
-    with patch("subprocess.run", side_effect=FileNotFoundError("docker not found")):
-        with pytest.raises(DockerUnavailableError):
-            launch_container(tmp_path / "worktree")
+    with (
+        patch("subprocess.run", side_effect=FileNotFoundError("docker not found")),
+        pytest.raises(DockerUnavailableError),
+    ):
+        launch_container(tmp_path / "worktree")
 
 
 def test_launch_container_raises_container_error_on_nonzero_exit(tmp_path: Path) -> None:
@@ -118,9 +120,11 @@ def test_launch_container_raises_container_error_on_nonzero_exit(tmp_path: Path)
 
 
 def test_launch_container_raises_container_error_when_no_id_printed(tmp_path: Path) -> None:
-    with patch("subprocess.run", return_value=_completed(0, stdout="\n")):
-        with pytest.raises(ContainerError):
-            launch_container(tmp_path / "worktree")
+    with (
+        patch("subprocess.run", return_value=_completed(0, stdout="\n")),
+        pytest.raises(ContainerError),
+    ):
+        launch_container(tmp_path / "worktree")
 
 
 def test_stop_container_succeeds_silently_when_already_gone() -> None:
@@ -152,9 +156,11 @@ def test_stop_container_raises_container_error_for_other_failures() -> None:
 def test_stop_container_raises_docker_unavailable_when_binary_missing() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
 
-    with patch("subprocess.run", side_effect=OSError("no such file")):
-        with pytest.raises(DockerUnavailableError):
-            stop_container(handle)
+    with (
+        patch("subprocess.run", side_effect=OSError("no such file")),
+        pytest.raises(DockerUnavailableError),
+    ):
+        stop_container(handle)
 
 
 def test_exec_in_container_builds_expected_args_and_returns_result() -> None:
@@ -218,6 +224,8 @@ def test_exec_in_container_raises_container_error_when_container_gone() -> None:
 def test_exec_in_container_raises_docker_unavailable_when_binary_missing() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
 
-    with patch("subprocess.run", side_effect=FileNotFoundError("docker not found")):
-        with pytest.raises(DockerUnavailableError):
-            exec_in_container(handle, ["echo", "hi"])
+    with (
+        patch("subprocess.run", side_effect=FileNotFoundError("docker not found")),
+        pytest.raises(DockerUnavailableError),
+    ):
+        exec_in_container(handle, ["echo", "hi"])

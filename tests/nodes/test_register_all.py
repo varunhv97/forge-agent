@@ -116,7 +116,7 @@ def test_manual_test_exec_build_input_raises_without_exactly_one_upstream_deploy
     request = request_factory()
     task = task_factory("t2", node_type="manual_test_exec")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="exactly one upstream deploy_exec output"):
         handlers.build_input(task, request, {})
 
 

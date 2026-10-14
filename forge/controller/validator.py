@@ -219,13 +219,12 @@ def compile_and_validate(
     )
     _check_permission_ceilings(draft, request, permission_registry)
 
-    compiled = draft.model_copy(
+    return draft.model_copy(
         update={
             "version": (prior_version.version + 1) if prior_version else 1,
             "status": "active",
         }
     )
-    return compiled
 
 
 def propagate_invalidation(

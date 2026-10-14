@@ -19,7 +19,7 @@ from forge.models.request import AcceptanceCriterion, Request
 # function, not proposed by a plan_decision node. That expansion is real
 # future work, not represented here yet.
 
-_UNIT_TESTS_PASS_CRITERION_ID = "unit_tests_pass"
+_UNIT_TESTS_PASS_CRITERION_ID = "unit_tests_pass"  # noqa: S105 - a criterion id
 _DEPLOYED_CRITERION_ID = "deployed"
 _JOURNEY_WORKS_CRITERION_ID = "journey_works"
 

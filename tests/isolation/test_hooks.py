@@ -7,12 +7,12 @@ from forge.models.permissions import PermissionProfile
 
 
 def _profile(**overrides) -> PermissionProfile:
-    defaults = dict(
-        name="test-profile",
-        allowed_tools=["Read", "Edit", "Write", "Bash(pytest*)"],
-        denied_bash_patterns=["git push*", "*vercel deploy*", "rm -rf *"],
-        network_allowed=False,
-    )
+    defaults = {
+        "name": "test-profile",
+        "allowed_tools": ["Read", "Edit", "Write", "Bash(pytest*)"],
+        "denied_bash_patterns": ["git push*", "*vercel deploy*", "rm -rf *"],
+        "network_allowed": False,
+    }
     defaults.update(overrides)
     return PermissionProfile(**defaults)
 
