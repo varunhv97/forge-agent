@@ -21,7 +21,11 @@ exactly the pattern this project exists to prevent.
 - Every module using `X | Y` union syntax still needs
   `from __future__ import annotations` at the top (keeps the codebase
   consistent).
-- Format with `black .`; run tests with `pytest`. CI runs both.
+- Format with `black .`, lint with `ruff check .`, type-check with `mypy`
+  (strict for `forge/` and `scripts/`), test with `pytest`. CI runs all four;
+  configuration lives in `pyproject.toml`.
+- New code is fully annotated. Prefer a `Protocol` over a concrete class for
+  injected dependencies, and justify any `# noqa` or `Any` inline.
 - Machine-specific setup notes, if any, go in `CLAUDE.local.md` (gitignored).
 
 ## Working agreement

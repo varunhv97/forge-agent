@@ -134,7 +134,12 @@ source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest
 black --check .
+ruff check .
+mypy
 ```
+
+`mypy` runs in strict mode over `forge/` and `scripts/`. Test bodies are
+type-checked too, but test functions aren't required to be annotated.
 
 The test suite runs fully offline. LLM, Vercel, Docker and Codex calls are
 faked with `httpx.MockTransport` or mocked subprocesses. The tests that need

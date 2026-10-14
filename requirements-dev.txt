@@ -1,3 +1,6 @@
 -r requirements.txt
 pytest==8.4.2
 black==25.11.0
+ruff==0.17.0
+mypy==2.4.0
+types-networkx==3.6.1.20261006
