@@ -23,14 +23,17 @@ def _build_prompt(input_model):
     return f"prompt: {input_model.text}"
 
 
-def test_register_and_get_roundtrip():
+def test_register_and_get_roundtrip(task_factory, request_factory):
     registry = ExecutionHandlerRegistry()
     handlers = ExecutionNodeHandlers(build_input=_build_input, build_prompt=_build_prompt)
     registry.register("implement_exec", handlers)
 
     fetched = registry.get("implement_exec")
     assert fetched is handlers
-    assert fetched.build_prompt(fetched.build_input(None, None, {})) == "prompt: hello"
+    assert (
+        fetched.build_prompt(fetched.build_input(task_factory("t1"), request_factory(), {}))
+        == "prompt: hello"
+    )
 
 
 def test_get_unknown_raises():

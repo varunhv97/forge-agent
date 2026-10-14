@@ -80,7 +80,7 @@ def _is_transient_status(status_code: int) -> bool:
 
 def _backoff_seconds(attempt_number: int) -> float:
     """`attempt_number` is 1-based: attempt 1's backoff is 0.5s, attempt 2's is 1s, etc."""
-    return _BASE_BACKOFF_SECONDS * (2 ** (attempt_number - 1))
+    return _BASE_BACKOFF_SECONDS * (2.0 ** (attempt_number - 1))
 
 
 class AnthropicAPIDecisionAdapter:

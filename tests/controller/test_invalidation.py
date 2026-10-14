@@ -14,7 +14,7 @@ from forge.controller.invalidation import (
 from forge.models.evidence import Evidence
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,

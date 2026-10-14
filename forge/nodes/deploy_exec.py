@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import BaseModel
 
 from forge.adapters.deploy.vercel_adapter import (
     DeploymentFile,
+    DeploymentResult,
     VercelCredentialError,
-    VercelDeployAdapter,
     VercelDeploymentError,
 )
 from forge.controller.mechanical import MechanicalContext, MechanicalResult, MechanicalRunner
@@ -62,7 +63,15 @@ def _collect_worktree_files(worktree_path: str) -> list[DeploymentFile]:
     return files
 
 
-def make_deploy_runner(adapter: VercelDeployAdapter) -> MechanicalRunner:
+class DeployAdapter(Protocol):
+    """What deploy_exec needs from a deploy backend (`VercelDeployAdapter` in production)."""
+
+    def deploy(
+        self, *, project_name: str, files: list[DeploymentFile], target: str
+    ) -> DeploymentResult: ...
+
+
+def make_deploy_runner(adapter: DeployAdapter) -> MechanicalRunner:
     """
     Builds a mechanical runner that deploys whatever is in the upstream
     worktree to Vercel via `adapter`. The project name is generated fresh

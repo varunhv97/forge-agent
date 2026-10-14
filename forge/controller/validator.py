@@ -47,8 +47,8 @@ def _check_depends_on_matches_edges(draft: GraphVersion) -> None:
                 )
 
 
-def _build_digraph(draft: GraphVersion) -> nx.DiGraph:
-    g = nx.DiGraph()
+def _build_digraph(draft: GraphVersion) -> nx.DiGraph[str]:
+    g: nx.DiGraph[str] = nx.DiGraph()
     for t in draft.tasks:
         g.add_node(t.id)
     for e in draft.edges:
@@ -56,7 +56,7 @@ def _build_digraph(draft: GraphVersion) -> nx.DiGraph:
     return g
 
 
-def _check_acyclic(g: nx.DiGraph) -> None:
+def _check_acyclic(g: nx.DiGraph[str]) -> None:
     if not nx.is_directed_acyclic_graph(g):
         cycle = next(nx.simple_cycles(g))
         raise GraphValidationError(f"cycle introduced: {cycle}")

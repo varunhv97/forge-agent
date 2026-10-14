@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+from claude_agent_sdk import ClaudeAgentOptions, HookContext, HookInput, HookMatcher
 from claude_agent_sdk import query as sdk_query
+from claude_agent_sdk.types import SyncHookJSONOutput
 
-from forge.isolation.hooks import HookDecision, PreToolUseHook, ToolCallEvent
+from forge.isolation.hooks import (
+    HookDecision,
+    PreToolUseHook,
+    ToolCallEvent,
+    build_pretooluse_hook,
+)
 from forge.models.permissions import PermissionProfile
 
 # Per built-in tool, which key in its `tool_input` dict holds the file path
@@ -30,7 +36,7 @@ class DecisionLogEntry:
     decision: HookDecision
 
 
-def tool_call_event_from_hook_input(hook_input: dict[str, Any]) -> ToolCallEvent:
+def tool_call_event_from_hook_input(hook_input: Mapping[str, Any]) -> ToolCallEvent:
     """
     Translates a Claude Agent SDK `PreToolUseHookInput` payload (a plain
     dict at the point a hook callback receives it) into the adapter-agnostic
@@ -48,7 +54,7 @@ def tool_call_event_from_hook_input(hook_input: dict[str, Any]) -> ToolCallEvent
     return ToolCallEvent(tool_name=tool_name, command=command, path=path)
 
 
-def hook_json_output_from_decision(decision: HookDecision) -> dict[str, Any]:
+def hook_json_output_from_decision(decision: HookDecision) -> SyncHookJSONOutput:
     """
     Translates a `HookDecision` back into the SDK's expected PreToolUse hook
     response shape: `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
@@ -73,7 +79,7 @@ def hook_json_output_from_decision(decision: HookDecision) -> dict[str, Any]:
 def make_pretooluse_hook_callback(
     policy: PreToolUseHook,
     decision_log: list[DecisionLogEntry] | None = None,
-) -> Callable[[dict[str, Any], str | None, dict[str, Any]], Awaitable[dict[str, Any]]]:
+) -> Callable[[HookInput, str | None, HookContext], Coroutine[Any, Any, SyncHookJSONOutput]]:
     """
     Wraps a policy-engine hook (`ToolCallEvent -> HookDecision`, built by
     `forge.isolation.hooks.build_pretooluse_hook`) as a Claude Agent SDK
@@ -87,10 +93,10 @@ def make_pretooluse_hook_callback(
     """
 
     async def callback(
-        hook_input: dict[str, Any],
+        hook_input: HookInput,
         _tool_use_id: str | None,
-        _context: dict[str, Any],
-    ) -> dict[str, Any]:
+        _context: HookContext,
+    ) -> SyncHookJSONOutput:
         event = tool_call_event_from_hook_input(hook_input)
         decision = policy(event)
         if decision_log is not None:
@@ -120,8 +126,6 @@ def build_claude_agent_options(
     exactly the property this project's enforcement story depends on. The
     task's own prompt is never trusted to stay within `profile` on its own.
     """
-    from forge.isolation.hooks import build_pretooluse_hook
-
     policy = build_pretooluse_hook(profile, worktree_path)
     callback = make_pretooluse_hook_callback(policy, decision_log=decision_log)
 

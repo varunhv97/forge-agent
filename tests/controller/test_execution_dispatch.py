@@ -208,4 +208,5 @@ def test_execution_runner_failure_is_recorded_as_failed_attempt(store: Store, re
     assert result.status == RunStatus.FAILED_EXHAUSTED
     attempt = store.load_attempts(run.id)[0]
     assert attempt.status == AttemptStatus.FAILED
+    assert attempt.failure_summary is not None
     assert "simulated adapter failure" in attempt.failure_summary

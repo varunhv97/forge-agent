@@ -19,7 +19,7 @@ class EmptyIO(BaseModel):
 def make_node_type(
     name: str,
     kind: NodeKind = NodeKind.EXECUTION,
-    required_upstream_node_types: frozenset = frozenset(),
+    required_upstream_node_types: frozenset[str] = frozenset(),
     produces_gate_evidence: bool = False,
     permission_profile: str = "default",
 ) -> NodeType:

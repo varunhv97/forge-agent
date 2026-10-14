@@ -66,7 +66,7 @@ class ContainerError(RuntimeError):
     """
 
 
-def _run_docker(args: list[str]) -> subprocess.CompletedProcess:
+def _run_docker(args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["docker", *args],
@@ -80,7 +80,7 @@ def _run_docker(args: list[str]) -> subprocess.CompletedProcess:
         raise DockerUnavailableError(f"failed to invoke 'docker {' '.join(args)}': {exc}") from exc
 
 
-def _docker_failure_message(result: subprocess.CompletedProcess) -> str:
+def _docker_failure_message(result: subprocess.CompletedProcess[str]) -> str:
     message = (result.stderr or result.stdout).strip()
     return message or f"docker exited with status {result.returncode} and produced no output"
 

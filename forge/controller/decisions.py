@@ -37,6 +37,24 @@ class ModelEligibilityChecker(Protocol):
     def validate_eligible(self, model_id: str, node_type_name: str) -> object: ...
 
 
+class DispatchRetryFn(Protocol):
+    """
+    How apply_decision starts a new attempt for a retried or escalated task.
+    Supplied by the scheduler, which owns dispatch; this module only decides
+    *whether* to dispatch and with which lineage.
+    """
+
+    def __call__(
+        self,
+        task: TaskSpec,
+        run: Run,
+        *,
+        model_used: str,
+        retries_from_attempt_id: str | None,
+        escalated_from_attempt_id: str | None,
+    ) -> Attempt: ...
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -204,7 +222,7 @@ def apply_decision(
     node_registry: NodeTypeRegistry,
     permission_registry: PermissionProfileRegistry,
     model_registry: ModelEligibilityChecker,
-    dispatch_retry,  # Callable[[TaskSpec, Run, str, str | None, str], Attempt] — see scheduler.dispatch_mechanical_attempt
+    dispatch_retry: DispatchRetryFn,
 ) -> Run:
     """
     The only place a DecisionProposal becomes a real state change. Every

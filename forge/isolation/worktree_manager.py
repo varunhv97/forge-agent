@@ -38,7 +38,7 @@ class WorktreeError(RuntimeError):
     """
 
 
-def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
+def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", "-C", str(repo_root), *args],
@@ -51,7 +51,7 @@ def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
         raise WorktreeError(f"failed to invoke 'git {' '.join(args)}': {exc}") from exc
 
 
-def _git_failure_message(result: subprocess.CompletedProcess) -> str:
+def _git_failure_message(result: subprocess.CompletedProcess[str]) -> str:
     message = (result.stderr or result.stdout).strip()
     return message or f"git exited with status {result.returncode} and produced no output"
 

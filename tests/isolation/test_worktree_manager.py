@@ -13,7 +13,7 @@ from forge.isolation.worktree_manager import (
 )
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
         capture_output=True,

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -32,8 +33,11 @@ class ExecutionRunOutcome:
 ExecutionRunner = Callable[[str, str, PermissionProfile, str], ExecutionRunOutcome]
 
 
+InputT = TypeVar("InputT", bound=BaseModel)
+
+
 @dataclass
-class ExecutionNodeHandlers:
+class ExecutionNodeHandlers(Generic[InputT]):
     """
     The two pure functions an EXECUTION node type owns: how to build its
     typed input from task/request/upstream context, and how to turn that
@@ -42,8 +46,8 @@ class ExecutionNodeHandlers:
     produce.
     """
 
-    build_input: Callable[[TaskSpec, Request, dict[str, BaseModel]], BaseModel]
-    build_prompt: Callable[[BaseModel], str]
+    build_input: Callable[[TaskSpec, Request, Mapping[str, BaseModel]], InputT]
+    build_prompt: Callable[[InputT], str]
 
 
 class UnknownExecutionHandlersError(KeyError):
@@ -60,14 +64,16 @@ class ExecutionHandlerRegistry:
     """
 
     def __init__(self) -> None:
-        self._handlers: dict[str, ExecutionNodeHandlers] = {}
+        # Heterogeneous across node types; each entry's build_input/build_prompt
+        # pairing is type-checked where its ExecutionNodeHandlers is constructed.
+        self._handlers: dict[str, ExecutionNodeHandlers[Any]] = {}
 
-    def register(self, node_type_name: str, handlers: ExecutionNodeHandlers) -> None:
+    def register(self, node_type_name: str, handlers: ExecutionNodeHandlers[Any]) -> None:
         if node_type_name in self._handlers:
             raise ValueError(f"execution handlers for '{node_type_name}' already registered")
         self._handlers[node_type_name] = handlers
 
-    def get(self, node_type_name: str) -> ExecutionNodeHandlers:
+    def get(self, node_type_name: str) -> ExecutionNodeHandlers[Any]:
         try:
             return self._handlers[node_type_name]
         except KeyError as exc:

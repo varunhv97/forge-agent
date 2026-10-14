@@ -8,6 +8,7 @@ from forge.controller.mechanical import (
     MechanicalRunnerRegistry,
     make_shell_runner,
 )
+from forge.controller.model_registry import ModelRegistry
 from forge.controller.scheduler import (
     ControllerDependencies,
     reconcile_orphaned_attempts,
@@ -18,8 +19,20 @@ from forge.controller.store import Store
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.common import NodeKind
 from forge.models.decision import DecisionAction, DecisionProposal
+from forge.models.graph import TaskSpec
 from forge.models.request import AcceptanceCriterion
-from forge.models.run import RunStatus
+from forge.models.run import Run, RunStatus
+
+
+def _unexpected_dispatch_retry(
+    task: TaskSpec,
+    run: Run,
+    *,
+    model_used: str,
+    retries_from_attempt_id: str | None,
+    escalated_from_attempt_id: str | None,
+) -> Attempt:
+    raise AssertionError("this decision should never dispatch a retry")
 
 
 def _mechanical_registry() -> MechanicalRunnerRegistry:
@@ -343,7 +356,6 @@ def test_live_decision_fn_overrides_fallback(
             created_at=datetime.now(UTC),
         )
 
-    from forge.controller.model_registry import ModelRegistry
     from forge.models.model_registry import ModelCapability
 
     model_registry = ModelRegistry(
@@ -480,12 +492,12 @@ def test_invalidated_evidence_causes_fresh_re_verification(
         store=store,
         node_registry=node_registry,
         permission_registry=permission_registry,
-        model_registry=None,  # not needed for PROPOSE_GRAPH_REVISION
-        dispatch_retry=None,  # not needed for PROPOSE_GRAPH_REVISION
+        model_registry=ModelRegistry([]),  # unused by PROPOSE_GRAPH_REVISION
+        dispatch_retry=_unexpected_dispatch_retry,
     )
 
     # t1 and t2 are superseded, not re-dispatched yet
-    attempts_by_task = {}
+    attempts_by_task: dict[str, list[Attempt]] = {}
     for a in store.load_attempts(run.id):
         attempts_by_task.setdefault(a.task_id, []).append(a)
     assert (
@@ -500,7 +512,7 @@ def test_invalidated_evidence_causes_fresh_re_verification(
     second_result = run_to_completion(run.id, store, deps)
     assert second_result.status == RunStatus.COMPLETED_VERIFIED
 
-    final_attempts = {}
+    final_attempts: dict[str, list[Attempt]] = {}
     for a in store.load_attempts(run.id):
         final_attempts.setdefault(a.task_id, []).append(a)
     # both tasks got a brand new attempt beyond the superseded one

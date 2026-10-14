@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Mapping
+from typing import Any, TypeVar, cast
 
 from claude_agent_sdk import HookMatcher
+from claude_agent_sdk.types import HookJSONOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput
 
 from forge.adapters.execution.sdk_execution_adapter import (
     DecisionLogEntry,
@@ -11,19 +14,49 @@ from forge.adapters.execution.sdk_execution_adapter import (
     make_pretooluse_hook_callback,
     tool_call_event_from_hook_input,
 )
-from forge.isolation.hooks import HookDecision
+from forge.isolation.hooks import HookDecision, build_pretooluse_hook
 from forge.models.permissions import PermissionProfile
+
+T = TypeVar("T")
 
 
 def _profile(**overrides) -> PermissionProfile:
-    defaults = dict(
-        name="test-profile",
-        allowed_tools=["Read", "Edit", "Bash(pytest*)"],
-        denied_bash_patterns=["git push*"],
-        network_allowed=False,
-    )
+    defaults = {
+        "name": "test-profile",
+        "allowed_tools": ["Read", "Edit", "Bash(pytest*)"],
+        "denied_bash_patterns": ["git push*"],
+        "network_allowed": False,
+    }
     defaults.update(overrides)
-    return PermissionProfile(**defaults)
+    return PermissionProfile.model_validate(defaults)
+
+
+def _bash_hook_input(command: str, tool_use_id: str, cwd: str = "/tmp/wt") -> PreToolUseHookInput:
+    """A complete PreToolUse payload, shaped exactly as the SDK delivers it."""
+    return {
+        "session_id": "s1",
+        "transcript_path": "/tmp/t",
+        "cwd": cwd,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_use_id": tool_use_id,
+    }
+
+
+def _pretooluse_output(output: HookJSONOutput) -> PreToolUseHookSpecificOutput:
+    """Asserts the output is a PreToolUse response and narrows it to that shape."""
+    specific = cast(Mapping[str, Any], output).get("hookSpecificOutput")
+    assert isinstance(specific, dict)
+    assert specific.get("hookEventName") == "PreToolUse"
+    return cast(PreToolUseHookSpecificOutput, specific)
+
+
+def _await(awaitable: Awaitable[T]) -> T:
+    async def _inner() -> T:
+        return await awaitable
+
+    return asyncio.run(_inner())
 
 
 # --- translation: SDK hook input -> ToolCallEvent -----------------------
@@ -70,16 +103,15 @@ def test_missing_tool_input_key_handled_gracefully():
 
 
 def test_allow_decision_translates_to_allow_output():
-    output = hook_json_output_from_decision(HookDecision.allow())
-    assert output["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-    assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert "permissionDecisionReason" not in output["hookSpecificOutput"]
+    output = _pretooluse_output(hook_json_output_from_decision(HookDecision.allow()))
+    assert output["permissionDecision"] == "allow"
+    assert "permissionDecisionReason" not in output
 
 
 def test_deny_decision_translates_to_deny_output_with_reason():
-    output = hook_json_output_from_decision(HookDecision.deny("nope"))
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert output["hookSpecificOutput"]["permissionDecisionReason"] == "nope"
+    output = _pretooluse_output(hook_json_output_from_decision(HookDecision.deny("nope")))
+    assert output["permissionDecision"] == "deny"
+    assert output.get("permissionDecisionReason") == "nope"
 
 
 # --- the wrapped hook callback, invoked the way the SDK would -------------
@@ -87,24 +119,17 @@ def test_deny_decision_translates_to_deny_output_with_reason():
 
 def test_hook_callback_denies_and_logs_a_disallowed_bash_command():
     profile = _profile()
-    from forge.isolation.hooks import build_pretooluse_hook
-
     policy = build_pretooluse_hook(profile, worktree_path="/tmp/wt")
     decision_log: list[DecisionLogEntry] = []
     callback = make_pretooluse_hook_callback(policy, decision_log=decision_log)
 
-    hook_input = {
-        "session_id": "s1",
-        "transcript_path": "/tmp/t",
-        "cwd": "/tmp/wt",
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "git push origin main"},
-        "tool_use_id": "tu_1",
-    }
-    output = asyncio.run(callback(hook_input, "tu_1", {"signal": None}))
+    output = _pretooluse_output(
+        asyncio.run(
+            callback(_bash_hook_input("git push origin main", "tu_1"), "tu_1", {"signal": None})
+        )
+    )
 
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert output["permissionDecision"] == "deny"
     assert len(decision_log) == 1
     assert decision_log[0].decision.allowed is False
     assert decision_log[0].event.command == "git push origin main"
@@ -112,24 +137,15 @@ def test_hook_callback_denies_and_logs_a_disallowed_bash_command():
 
 def test_hook_callback_allows_a_permitted_bash_command():
     profile = _profile()
-    from forge.isolation.hooks import build_pretooluse_hook
-
     policy = build_pretooluse_hook(profile, worktree_path="/tmp/wt")
     decision_log: list[DecisionLogEntry] = []
     callback = make_pretooluse_hook_callback(policy, decision_log=decision_log)
 
-    hook_input = {
-        "session_id": "s1",
-        "transcript_path": "/tmp/t",
-        "cwd": "/tmp/wt",
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "pytest -q"},
-        "tool_use_id": "tu_2",
-    }
-    output = asyncio.run(callback(hook_input, "tu_2", {"signal": None}))
+    output = _pretooluse_output(
+        asyncio.run(callback(_bash_hook_input("pytest -q", "tu_2"), "tu_2", {"signal": None}))
+    )
 
-    assert output["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert output["permissionDecision"] == "allow"
     assert decision_log[0].decision.allowed is True
 
 
@@ -161,6 +177,7 @@ def test_build_claude_agent_options_registers_one_pretooluse_matcher():
     options = build_claude_agent_options(
         profile=_profile(), worktree_path="/tmp/wt-1", model="claude-sonnet-5"
     )
+    assert options.hooks is not None
     matchers = options.hooks["PreToolUse"]
     assert len(matchers) == 1
     matcher = matchers[0]
@@ -187,18 +204,12 @@ def test_build_claude_agent_options_wired_hook_actually_enforces_the_profile():
         model="claude-sonnet-5",
         decision_log=decision_log,
     )
+    assert options.hooks is not None
     callback = options.hooks["PreToolUse"][0].hooks[0]
 
-    hook_input = {
-        "session_id": "s1",
-        "transcript_path": "/tmp/t",
-        "cwd": "/tmp/wt-1",
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_input": {"command": "git push origin main"},
-        "tool_use_id": "tu_3",
-    }
-    output = asyncio.run(callback(hook_input, "tu_3", {"signal": None}))
+    hook_input = _bash_hook_input("git push origin main", "tu_3", cwd="/tmp/wt-1")
+    output = _pretooluse_output(_await(callback(hook_input, "tu_3", {"signal": None})))
 
-    assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert decision_log and decision_log[-1].decision.allowed is False
+    assert output["permissionDecision"] == "deny"
+    assert decision_log
+    assert decision_log[-1].decision.allowed is False

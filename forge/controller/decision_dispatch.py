@@ -4,6 +4,7 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from forge.models.decision import DecisionAction, DecisionProposal
 
@@ -20,8 +21,8 @@ DECISION_MODEL_BY_NODE_TYPE: dict[str, str] = {
 # validated DecisionProposal, or raises on any failure (network, malformed
 # output, anything) — invoke_decision_node treats every exception the same
 # way: fall back to the deterministic policy for that node type.
-DecisionFn = Callable[[str, dict], DecisionProposal]
-FallbackFn = Callable[[dict], DecisionProposal]
+DecisionFn = Callable[[str, dict[str, Any]], DecisionProposal]
+FallbackFn = Callable[[dict[str, Any]], DecisionProposal]
 
 
 class DecisionUnavailableError(RuntimeError):
@@ -40,7 +41,7 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def retry_or_escalate_fallback(context: dict) -> DecisionProposal:
+def retry_or_escalate_fallback(context: dict[str, Any]) -> DecisionProposal:
     """
     The hand-written, non-LLM default for retry_or_escalate_policy: retry
     once with generic feedback if the task's retry budget allows it,
@@ -89,7 +90,7 @@ DEFAULT_FALLBACK_POLICIES: dict[str, FallbackFn] = {
 
 def invoke_decision_node(
     decision_node_type: str,
-    context: dict,
+    context: dict[str, Any],
     decision_fn: DecisionFn | None,
     fallback_policies: dict[str, FallbackFn],
 ) -> DecisionProposal:

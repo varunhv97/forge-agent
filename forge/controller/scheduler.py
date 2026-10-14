@@ -32,8 +32,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from forge.controller.attempt_commit import (
     GitStateError,
@@ -51,7 +52,12 @@ from forge.controller.decisions import RejectedProposalError, apply_decision
 from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunner
 from forge.controller.mechanical import MechanicalContext, MechanicalRunnerRegistry
 from forge.controller.model_registry import ModelRegistry
-from forge.controller.node_registry import NodeType, NodeTypeRegistry, PermissionProfileRegistry
+from forge.controller.node_registry import (
+    NodeType,
+    NodeTypeRegistry,
+    PermissionProfileRegistry,
+    UnknownNodeTypeError,
+)
 from forge.controller.store import Store
 from forge.isolation.worktree_manager import create_worktree
 from forge.models.attempt import Attempt, AttemptStatus
@@ -367,7 +373,7 @@ def dispatch_mechanical_attempt(
 
 def _collect_upstream_outputs(
     task: TaskSpec, graph: GraphVersion, attempts: list[Attempt], node_registry: NodeTypeRegistry
-) -> dict[str, object]:
+) -> dict[str, BaseModel]:
     """
     Builds the `{upstream_task_id: parsed_output_model}` mapping an
     EXECUTION node's `build_input` consumes. Only PASSED dependencies
@@ -377,7 +383,7 @@ def _collect_upstream_outputs(
     """
     task_by_id = {t.id: t for t in graph.tasks}
     latest_by_task = _latest_attempt_per_task(attempts)
-    outputs: dict[str, object] = {}
+    outputs: dict[str, BaseModel] = {}
     for dep_id in task.depends_on:
         dep_attempt = latest_by_task.get(dep_id)
         if dep_attempt is None or dep_attempt.status != AttemptStatus.PASSED:
@@ -388,7 +394,7 @@ def _collect_upstream_outputs(
         try:
             dep_node_type = node_registry.get(dep_task.node_type)
             outputs[dep_id] = dep_node_type.output_schema.model_validate(dep_attempt.outputs)
-        except Exception:
+        except (UnknownNodeTypeError, ValidationError):
             continue
     return outputs
 
@@ -572,7 +578,7 @@ def dispatch_execution_attempt(
 
 def _decision_context_for_failure(
     task: TaskSpec, failed_attempt: Attempt, attempts: list[Attempt], request: Request
-) -> dict:
+) -> dict[str, Any]:
     attempt_count = sum(1 for a in attempts if a.task_id == task.id)
     return {
         "task_id": task.id,
@@ -628,8 +634,13 @@ def _resolve_failed_tasks(
     """
 
     def dispatch_retry(
-        task, run, *, model_used, retries_from_attempt_id, escalated_from_attempt_id
-    ):
+        task: TaskSpec,
+        run: Run,
+        *,
+        model_used: str,
+        retries_from_attempt_id: str | None,
+        escalated_from_attempt_id: str | None,
+    ) -> Attempt:
         attempts = store.load_attempts(run.id)
         attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
         if task.node_kind == NodeKind.EXECUTION:
@@ -738,11 +749,16 @@ def controller_tick(
     request = store.load_request(run.request_id)
     graph = store.load_graph_version(run.active_graph_version_id)
     attempts = store.load_attempts(run_id)
-    execution_available = deps.execution_runner is not None and deps.repo_root is not None
+    execution_runner = deps.execution_runner
+    repo_root = deps.repo_root
+    execution_available = execution_runner is not None and repo_root is not None
 
     for task in _ready_tasks(graph, attempts, execution_available=execution_available):
         attempt_number = 1 + sum(1 for a in attempts if a.task_id == task.id)
         if task.node_kind == NodeKind.EXECUTION:
+            # _ready_tasks never yields an EXECUTION task without both.
+            if execution_runner is None or repo_root is None:
+                raise RuntimeError(f"EXECUTION task '{task.id}' ready with no runner configured")
             dispatched = dispatch_execution_attempt(
                 task,
                 run,
@@ -753,8 +769,8 @@ def controller_tick(
                 deps.node_registry,
                 deps.permission_registry,
                 deps.execution_handler_registry,
-                deps.execution_runner,
-                deps.repo_root,
+                execution_runner,
+                repo_root,
             )
         else:
             dispatched = dispatch_mechanical_attempt(

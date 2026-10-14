@@ -52,7 +52,7 @@ ContainerExecutor = Callable[[Any, list[str], str], Any]
 class CodexExecutionResult:
     """What one Codex CLI attempt produced, translated out of its raw JSONL stream."""
 
-    events: list[dict] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     final_message: str | None = None
     returncode: int = 0
     raw_stdout: str = ""
@@ -100,7 +100,7 @@ def build_codex_command(prompt: str, model: str) -> list[str]:
     ]
 
 
-def _extract_final_message(events: list[dict]) -> str | None:
+def _extract_final_message(events: list[dict[str, Any]]) -> str | None:
     """
     Best-effort extraction of "the agent's final response text" out of a
     list of parsed `codex exec --json` events.
@@ -142,7 +142,7 @@ def _extract_final_message(events: list[dict]) -> str | None:
     return last_found
 
 
-def parse_codex_jsonl(stdout: str) -> tuple[list[dict], str | None]:
+def parse_codex_jsonl(stdout: str) -> tuple[list[dict[str, Any]], str | None]:
     """
     Parses `codex exec --json` stdout defensively: each non-empty line is
     parsed as JSON independently, every successfully-parsed object is kept
@@ -154,7 +154,7 @@ def parse_codex_jsonl(stdout: str) -> tuple[list[dict], str | None]:
     Returns `(events, final_message)`, where `final_message` is the
     best-effort extraction documented on `_extract_final_message`.
     """
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     for line in stdout.splitlines():
         stripped = line.strip()
         if not stripped:

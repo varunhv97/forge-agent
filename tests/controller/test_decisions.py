@@ -77,7 +77,7 @@ def _proposal(action, **overrides) -> DecisionProposal:
 class _FakeModelRegistry:
     def __init__(self, eligible: bool = True):
         self.eligible = eligible
-        self.calls = []
+        self.calls: list[tuple[str, str]] = []
 
     def validate_eligible(self, model_id, node_type_name):
         self.calls.append((model_id, node_type_name))

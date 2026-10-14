@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from pydantic import BaseModel
 
 from forge.controller.node_registry import NodeType
@@ -25,7 +27,7 @@ class IntegrationTestWriteOutput(BaseModel):
 def build_input(
     task: TaskSpec,
     request: Request,
-    upstream_outputs: dict[str, BaseModel],
+    upstream_outputs: Mapping[str, BaseModel],
 ) -> IntegrationTestWriteInput:
     """
     Pure assembly of this node's input from the surrounding graph state.

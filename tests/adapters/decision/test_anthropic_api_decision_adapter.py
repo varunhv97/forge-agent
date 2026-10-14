@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -47,7 +48,9 @@ class CountingHandler:
         return self._responses[index](request)
 
 
-def _tool_use_response(tool_name: str, input_obj: dict, status_code: int = 200) -> httpx.Response:
+def _tool_use_response(
+    tool_name: str, input_obj: dict[str, Any], status_code: int = 200
+) -> httpx.Response:
     body = {
         "id": "msg_1",
         "type": "message",
@@ -309,7 +312,7 @@ def test_decision_proposal_round_trips_through_schema_and_back():
 
 
 def test_request_sends_forced_tool_choice_and_required_headers():
-    captured: dict = {}
+    captured: dict[str, Any] = {}
 
     def handler_fn(req: httpx.Request) -> httpx.Response:
         captured["headers"] = req.headers

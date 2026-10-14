@@ -13,7 +13,7 @@ class GitStateError(RuntimeError):
     """
 
 
-def _run_git(repo_path: str | Path, args: list[str]) -> subprocess.CompletedProcess:
+def _run_git(repo_path: str | Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", "-C", str(repo_path), *args],

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from collections.abc import Mapping
 
 from pydantic import BaseModel
 
@@ -14,7 +14,12 @@ from forge.models.request import Request
 from forge.nodes import implement_exec as implement_exec_module
 from forge.nodes import integration_test_write_exec as integration_test_write_exec_module
 from forge.nodes import manual_test_exec as manual_test_exec_module
-from forge.nodes.deploy_exec import DEPLOY_EXEC, DeployExecOutput, make_deploy_runner
+from forge.nodes.deploy_exec import (
+    DEPLOY_EXEC,
+    DeployAdapter,
+    DeployExecOutput,
+    make_deploy_runner,
+)
 from forge.nodes.implement_exec import IMPLEMENT_EXEC
 from forge.nodes.integration_test_write_exec import INTEGRATION_TEST_WRITE_EXEC
 from forge.nodes.integration_verify_exec import (
@@ -70,7 +75,7 @@ DEPLOY_DEFAULT = PermissionProfile(name="deploy_default", allowed_tools=[], netw
 
 
 def _manual_test_build_input(
-    task: TaskSpec, request: Request, upstream_outputs: dict[str, BaseModel]
+    task: TaskSpec, request: Request, upstream_outputs: Mapping[str, BaseModel]
 ) -> manual_test_exec_module.ManualTestInput:
     """
     Bridges the dispatcher's generic `(task, request, upstream_outputs)`
@@ -101,7 +106,7 @@ def register_all(
     permission_registry: PermissionProfileRegistry,
     mechanical_registry: MechanicalRunnerRegistry | None = None,
     execution_handler_registry: ExecutionHandlerRegistry | None = None,
-    deploy_adapter: VercelDeployAdapter | None = None,
+    deploy_adapter: DeployAdapter | None = None,
 ) -> None:
     """
     Register every node type and permission profile defined in this package

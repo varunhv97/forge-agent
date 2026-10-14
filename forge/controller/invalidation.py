@@ -18,7 +18,7 @@ class InvalidationCheckError(RuntimeError):
     """
 
 
-def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
+def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             ["git", "-C", str(repo_root), *args],

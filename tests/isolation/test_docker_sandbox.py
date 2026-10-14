@@ -18,7 +18,9 @@ from forge.isolation.docker_sandbox import (
 )
 
 
-def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+def _completed(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
@@ -26,7 +28,7 @@ def test_launch_container_builds_expected_args_with_network_disallowed(tmp_path:
     worktree_path = tmp_path / "worktree"
     captured: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         captured.append(args)
         return _completed(0, stdout="abc123\n")
 
@@ -60,7 +62,7 @@ def test_launch_container_builds_expected_args_with_network_allowed(tmp_path: Pa
     worktree_path = tmp_path / "worktree"
     captured: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         captured.append(args)
         return _completed(0, stdout="def456\n")
 
@@ -159,7 +161,7 @@ def test_exec_in_container_builds_expected_args_and_returns_result() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
     captured: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         captured.append(args)
         return _completed(0, stdout="hello\n", stderr="")
 
@@ -174,7 +176,7 @@ def test_exec_in_container_uses_custom_cwd() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
     captured: list[list[str]] = []
 
-    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
         captured.append(args)
         return _completed(0)
 

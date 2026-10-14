@@ -34,6 +34,7 @@ def test_tool_not_in_allowlist_is_denied(tmp_path):
     hook = build_pretooluse_hook(_profile(), str(tmp_path))
     decision = hook(ToolCallEvent(tool_name="WebFetch"))
     assert decision.allowed is False
+    assert decision.reason is not None
     assert "WebFetch" in decision.reason
 
 
@@ -48,6 +49,7 @@ def test_explicit_deny_pattern_wins_over_wildcard_allow(tmp_path):
     hook = build_pretooluse_hook(profile, str(tmp_path))
     decision = hook(ToolCallEvent(tool_name="Bash", command="git push origin main"))
     assert decision.allowed is False
+    assert decision.reason is not None
     assert "denied pattern" in decision.reason
 
 
@@ -56,6 +58,7 @@ def test_network_looking_bash_denied_when_network_not_allowed(tmp_path):
     hook = build_pretooluse_hook(profile, str(tmp_path))
     decision = hook(ToolCallEvent(tool_name="Bash", command="curl https://example.com"))
     assert decision.allowed is False
+    assert decision.reason is not None
     assert "network" in decision.reason
 
 
@@ -83,6 +86,7 @@ def test_path_outside_worktree_denied(tmp_path):
     hook = build_pretooluse_hook(_profile(), str(worktree))
     decision = hook(ToolCallEvent(tool_name="Read", path=str(outside)))
     assert decision.allowed is False
+    assert decision.reason is not None
     assert "outside" in decision.reason
 
 
@@ -108,6 +112,7 @@ def test_symlink_escape_denied(tmp_path):
     hook = build_pretooluse_hook(_profile(), str(worktree))
     decision = hook(ToolCallEvent(tool_name="Read", path=str(symlink_path)))
     assert decision.allowed is False
+    assert decision.reason is not None
     assert "outside" in decision.reason
 
 

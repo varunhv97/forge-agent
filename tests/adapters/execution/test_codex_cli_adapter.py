@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from forge.adapters.execution.codex_cli_adapter import (
@@ -23,7 +25,7 @@ class _RecordingExecutor:
 
     def __init__(self, result: _FakeExecResult):
         self._result = result
-        self.calls: list[tuple] = []
+        self.calls: list[tuple[Any, list[str], str]] = []
 
     def __call__(self, container, command, cwd):
         self.calls.append((container, command, cwd))
