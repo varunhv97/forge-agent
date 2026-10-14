@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Dict
 
 from pydantic import BaseModel
 
@@ -42,7 +42,7 @@ class ExecutionNodeHandlers:
     produce.
     """
 
-    build_input: Callable[[TaskSpec, Request, Dict[str, BaseModel]], BaseModel]
+    build_input: Callable[[TaskSpec, Request, dict[str, BaseModel]], BaseModel]
     build_prompt: Callable[[BaseModel], str]
 
 
@@ -60,7 +60,7 @@ class ExecutionHandlerRegistry:
     """
 
     def __init__(self) -> None:
-        self._handlers: Dict[str, ExecutionNodeHandlers] = {}
+        self._handlers: dict[str, ExecutionNodeHandlers] = {}
 
     def register(self, node_type_name: str, handlers: ExecutionNodeHandlers) -> None:
         if node_type_name in self._handlers:

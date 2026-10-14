@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -19,7 +20,7 @@ class MechanicalResult(BaseModel):
     # mechanical upstream's result the same way it consumes an EXECUTION
     # one. Most mechanical runners (pytest, lint) have nothing structured
     # to report and leave this empty.
-    outputs: Dict[str, Any] = {}
+    outputs: dict[str, Any] = {}
     # True only when passed=False AND the runner itself can tell retrying
     # with the same inputs is guaranteed to fail the same way again (e.g.
     # deploy_exec classifying a Vercel response as an invalid/rejected
@@ -44,7 +45,7 @@ class MechanicalContext:
     the behavior every mechanical node had before this existed.
     """
 
-    worktree_path: Optional[str] = None
+    worktree_path: str | None = None
 
 
 MechanicalRunner = Callable[[TaskSpec, MechanicalContext], MechanicalResult]
@@ -63,7 +64,7 @@ class MechanicalRunnerRegistry:
     """
 
     def __init__(self) -> None:
-        self._runners: Dict[str, MechanicalRunner] = {}
+        self._runners: dict[str, MechanicalRunner] = {}
 
     def register(self, node_type_name: str, runner: MechanicalRunner) -> None:
         if node_type_name in self._runners:

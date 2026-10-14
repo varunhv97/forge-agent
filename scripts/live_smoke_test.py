@@ -27,29 +27,29 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from forge.adapters.execution.sdk_node_runner import run_sdk_node  # noqa: E402
-from forge.controller import db  # noqa: E402
-from forge.controller.execution_registry import ExecutionHandlerRegistry  # noqa: E402
-from forge.controller.mechanical import MechanicalRunnerRegistry  # noqa: E402
-from forge.controller.model_registry import ModelRegistry  # noqa: E402
-from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry  # noqa: E402
+from forge.adapters.execution.sdk_node_runner import run_sdk_node
+from forge.controller import db
+from forge.controller.execution_registry import ExecutionHandlerRegistry
+from forge.controller.mechanical import MechanicalRunnerRegistry
+from forge.controller.model_registry import ModelRegistry
+from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import (
     ControllerDependencies,
     run_to_completion,
     start_run,
-)  # noqa: E402
-from forge.controller.store import Store  # noqa: E402
-from forge.models.common import NodeKind  # noqa: E402
-from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec  # noqa: E402
-from forge.models.permissions import Budgets  # noqa: E402
-from forge.models.request import AcceptanceCriterion, Request  # noqa: E402
-from forge.models.run import RunStatus  # noqa: E402
-from forge.nodes import register_all  # noqa: E402
+)
+from forge.controller.store import Store
+from forge.models.common import NodeKind
+from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec
+from forge.models.permissions import Budgets
+from forge.models.request import AcceptanceCriterion, Request
+from forge.models.run import RunStatus
+from forge.nodes import register_all
 
 DEFAULT_OBJECTIVE = (
     "Create math_utils.py with a function add(a, b) that returns a + b, " "and a unit test for it."
@@ -80,7 +80,7 @@ def build_graph(objective: str) -> tuple[Request, GraphVersion]:
         objective_text=objective,
         acceptance_criteria=[criterion],
         budgets=Budgets(max_cost_usd=5.0, max_wall_seconds=600),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     t1 = TaskSpec(
         id="t1",
@@ -107,7 +107,7 @@ def build_graph(objective: str) -> tuple[Request, GraphVersion]:
         edges=[EdgeSpec(from_task="t1", to_task="t2", relation="dependency")],
         status="active",
         created_by="scripts/live_smoke_test.py",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     return request, graph
 

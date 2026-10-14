@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -15,12 +15,12 @@ from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRe
 from forge.models.attempt import Attempt, AttemptStatus
 from forge.models.decision import DecisionAction, DecisionProposal, GraphRevisionProposal
 from forge.models.evidence import Evidence
-from forge.models.permissions import Budgets, PermissionProfile
+from forge.models.permissions import Budgets
 from forge.models.run import Run, RunStatus
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _make_run(req, graph, store) -> Run:

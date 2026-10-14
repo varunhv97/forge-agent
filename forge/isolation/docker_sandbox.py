@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List
 
 from pydantic import BaseModel
 
@@ -67,7 +66,7 @@ class ContainerError(RuntimeError):
     """
 
 
-def _run_docker(args: List[str]) -> subprocess.CompletedProcess:
+def _run_docker(args: list[str]) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             ["docker", *args],
@@ -164,7 +163,7 @@ def stop_container(handle: ContainerHandle) -> None:
 
 
 def exec_in_container(
-    handle: ContainerHandle, command: List[str], *, cwd: str = "/workspace"
+    handle: ContainerHandle, command: list[str], *, cwd: str = "/workspace"
 ) -> ExecResult:
     """
     Runs `command` inside an already-running sandbox container via

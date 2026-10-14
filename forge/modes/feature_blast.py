@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from forge.models.common import Mode, NodeKind
 from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec
@@ -48,7 +48,7 @@ def build_feature_blast_request_and_graph(
     """
     request_id = request_id or f"req-{uuid.uuid4().hex[:8]}"
     graph_version_id = graph_version_id or f"gv-{uuid.uuid4().hex[:8]}"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     acceptance_criteria = [
         AcceptanceCriterion(

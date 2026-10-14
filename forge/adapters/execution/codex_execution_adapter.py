@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
 from forge.adapters.execution.codex_cli_adapter import CodexExecutionResult, run_codex_attempt
 from forge.isolation.docker_sandbox import exec_in_container, launch_container, stop_container
 
 
-def _exec_adapter(container: Any, command: List[str], cwd: str) -> Any:
+def _exec_adapter(container: Any, command: list[str], cwd: str) -> Any:
     """
     Bridges `codex_cli_adapter`'s `ContainerExecutor` shape (positional
     `cwd`) to `docker_sandbox.exec_in_container`'s real signature (`cwd` is

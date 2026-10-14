@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, Type
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -18,8 +18,8 @@ class NodeType(BaseModel):
 
     name: str
     kind: NodeKind
-    input_schema: Type[BaseModel]
-    output_schema: Type[BaseModel]
+    input_schema: type[BaseModel]
+    output_schema: type[BaseModel]
     permission_profile: str
     # Which upstream node TYPES must appear among a task's depends_on for its
     # input to be satisfiable. A conservative, name-based check rather than

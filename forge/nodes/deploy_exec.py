@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import List
 
 from pydantic import BaseModel
 
@@ -38,7 +37,7 @@ class DeployExecOutput(BaseModel):
 _EXCLUDED_DIR_NAMES = {".git", ".forge"}
 
 
-def _collect_worktree_files(worktree_path: str) -> List[DeploymentFile]:
+def _collect_worktree_files(worktree_path: str) -> list[DeploymentFile]:
     """
     Reads every text file in `worktree_path` (recursively, skipping git/
     forge bookkeeping directories) into a `DeploymentFile` list. Binary
@@ -49,7 +48,7 @@ def _collect_worktree_files(worktree_path: str) -> List[DeploymentFile]:
     milestone doesn't need yet.
     """
     root = Path(worktree_path)
-    files: List[DeploymentFile] = []
+    files: list[DeploymentFile] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue

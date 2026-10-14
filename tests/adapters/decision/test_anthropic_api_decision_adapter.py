@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -283,7 +283,7 @@ def test_decision_proposal_round_trips_through_schema_and_back():
         confidence=0.87,
         evidence_refs=["ev-1", "ev-2"],
         model_used="claude-sonnet-5",
-        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
     )
     dumped_input = proposal.model_dump(mode="json")
 

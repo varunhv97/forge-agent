@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Callable, Dict, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from forge.models.decision import DecisionAction, DecisionProposal
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # Decision-node model selection is a fixed table, not routed through
 # another decision node — this is what stops the "which model decides
 # which model decides" regress by fiat rather than by cleverness.
-DECISION_MODEL_BY_NODE_TYPE: Dict[str, str] = {
+DECISION_MODEL_BY_NODE_TYPE: dict[str, str] = {
     "retry_or_escalate_policy": "claude-sonnet-5",
 }
 
@@ -37,7 +37,7 @@ def _new_id() -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def retry_or_escalate_fallback(context: dict) -> DecisionProposal:
@@ -82,7 +82,7 @@ def retry_or_escalate_fallback(context: dict) -> DecisionProposal:
     )
 
 
-DEFAULT_FALLBACK_POLICIES: Dict[str, FallbackFn] = {
+DEFAULT_FALLBACK_POLICIES: dict[str, FallbackFn] = {
     "retry_or_escalate_policy": retry_or_escalate_fallback,
 }
 
@@ -90,8 +90,8 @@ DEFAULT_FALLBACK_POLICIES: Dict[str, FallbackFn] = {
 def invoke_decision_node(
     decision_node_type: str,
     context: dict,
-    decision_fn: Optional[DecisionFn],
-    fallback_policies: Dict[str, FallbackFn],
+    decision_fn: DecisionFn | None,
+    fallback_policies: dict[str, FallbackFn],
 ) -> DecisionProposal:
     """
     Calls `decision_fn` (if one is configured) for `decision_node_type`. On

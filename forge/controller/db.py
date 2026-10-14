@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Union
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_trace_events_run_id ON trace_events (run_id, crea
 """
 
 
-def connect(path: Union[str, Path]) -> sqlite3.Connection:
+def connect(path: str | Path) -> sqlite3.Connection:
     """
     Opens (and initializes, if needed) the Forge database at `path`. WAL
     mode keeps a crash mid-write from corrupting the file and keeps reads

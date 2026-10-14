@@ -30,9 +30,8 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, Optional, Union
 
 from pydantic import ValidationError
 
@@ -85,8 +84,8 @@ class ControllerDependencies:
         default_factory=PermissionProfileRegistry
     )
     model_registry: ModelRegistry = field(default_factory=lambda: ModelRegistry([]))
-    decision_fn: Optional[DecisionFn] = None
-    fallback_policies: Dict[str, FallbackFn] = field(
+    decision_fn: DecisionFn | None = None
+    fallback_policies: dict[str, FallbackFn] = field(
         default_factory=lambda: dict(DEFAULT_FALLBACK_POLICIES)
     )
     # EXECUTION-kind dispatch is entirely optional: with execution_runner
@@ -96,8 +95,8 @@ class ControllerDependencies:
     execution_handler_registry: ExecutionHandlerRegistry = field(
         default_factory=ExecutionHandlerRegistry
     )
-    execution_runner: Optional[ExecutionRunner] = None
-    repo_root: Optional[Path] = None
+    execution_runner: ExecutionRunner | None = None
+    repo_root: Path | None = None
 
 
 def new_id(prefix: str) -> str:
@@ -105,7 +104,7 @@ def new_id(prefix: str) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def start_run(request: Request, graph: GraphVersion, store: Store) -> Run:
@@ -263,7 +262,7 @@ def all_required_gates_met(
     return True
 
 
-def _upstream_worktree_path(task: TaskSpec, attempts: list[Attempt]) -> Optional[str]:
+def _upstream_worktree_path(task: TaskSpec, attempts: list[Attempt]) -> str | None:
     """
     A mechanical task that depends on something which produced a worktree
     (an EXECUTION attempt) runs inside that same worktree — it's verifying
@@ -287,9 +286,9 @@ def dispatch_mechanical_attempt(
     mechanical_registry: MechanicalRunnerRegistry,
     *,
     model_used: str = "mechanical",
-    retries_from_attempt_id: Optional[str] = None,
-    escalated_from_attempt_id: Optional[str] = None,
-    all_attempts: Optional[list[Attempt]] = None,
+    retries_from_attempt_id: str | None = None,
+    escalated_from_attempt_id: str | None = None,
+    all_attempts: list[Attempt] | None = None,
 ) -> Attempt:
     """
     Creates and synchronously runs one attempt for `task`. Used both by the
@@ -368,7 +367,7 @@ def dispatch_mechanical_attempt(
 
 def _collect_upstream_outputs(
     task: TaskSpec, graph: GraphVersion, attempts: list[Attempt], node_registry: NodeTypeRegistry
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """
     Builds the `{upstream_task_id: parsed_output_model}` mapping an
     EXECUTION node's `build_input` consumes. Only PASSED dependencies
@@ -378,7 +377,7 @@ def _collect_upstream_outputs(
     """
     task_by_id = {t.id: t for t in graph.tasks}
     latest_by_task = _latest_attempt_per_task(attempts)
-    outputs: Dict[str, object] = {}
+    outputs: dict[str, object] = {}
     for dep_id in task.depends_on:
         dep_attempt = latest_by_task.get(dep_id)
         if dep_attempt is None or dep_attempt.status != AttemptStatus.PASSED:
@@ -399,7 +398,7 @@ _RESULT_FILE_NAME = ".forge_result.json"
 
 def _read_result_file(
     worktree_path: str, node_type: NodeType, fallback_summary: str
-) -> tuple[bool, str, Dict[str, object]]:
+) -> tuple[bool, str, dict[str, object]]:
     """
     For `output_strategy == "result_file"` node types: reads and validates
     `.forge_result.json` from the worktree rather than trusting anything
@@ -441,9 +440,9 @@ def dispatch_execution_attempt(
     execution_runner: ExecutionRunner,
     repo_root: Path,
     *,
-    model_used: Optional[str] = None,
-    retries_from_attempt_id: Optional[str] = None,
-    escalated_from_attempt_id: Optional[str] = None,
+    model_used: str | None = None,
+    retries_from_attempt_id: str | None = None,
+    escalated_from_attempt_id: str | None = None,
 ) -> Attempt:
     """
     Creates and synchronously runs one EXECUTION attempt: a fresh worktree,
@@ -497,8 +496,8 @@ def dispatch_execution_attempt(
 
     passed = False
     summary = outcome.summary
-    output_dict: Dict[str, object] = {}
-    result_commit: Optional[str] = None
+    output_dict: dict[str, object] = {}
+    result_commit: str | None = None
     changed_paths: list[str] = []
 
     if outcome.completed:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -72,7 +72,7 @@ def _make_evidence(
         commit_sha=commit_sha,
         touched_paths=touched_paths or [],
         raw_artifact_id="artifact-1",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

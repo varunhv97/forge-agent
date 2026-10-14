@@ -3,8 +3,8 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from pydantic import BaseModel
 

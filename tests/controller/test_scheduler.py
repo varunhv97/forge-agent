@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from forge.controller import db
-from forge.controller.decision_dispatch import DEFAULT_FALLBACK_POLICIES
 from forge.controller.mechanical import (
     MechanicalResult,
     MechanicalRunnerRegistry,
@@ -176,7 +175,7 @@ def test_crash_mid_dispatch_resumes_without_duplicate_or_lost_work(
         branch_name="",
         base_commit="",
         status=AttemptStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     store1.save_attempt(orphaned_attempt)
     conn1.close()  # simulates the process dying — no clean shutdown, no final status
@@ -341,7 +340,7 @@ def test_live_decision_fn_overrides_fallback(
             confidence=0.9,
             evidence_refs=["ev-live"],
             model_used="claude-sonnet-5",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
 
     from forge.controller.model_registry import ModelRegistry
@@ -418,11 +417,10 @@ def test_invalidated_evidence_causes_fresh_re_verification(
     and completion must be re-derived from the *new* evidence, not the
     invalidated one.
     """
-    from tests.conftest import make_node_type
-
     from forge.controller.decisions import apply_decision
     from forge.controller.node_registry import NodeTypeRegistry
     from forge.models.decision import DecisionProposal, GraphRevisionProposal
+    from tests.conftest import make_node_type
 
     node_registry = NodeTypeRegistry()
     node_registry.register(
@@ -471,7 +469,7 @@ def test_invalidated_evidence_causes_fresh_re_verification(
         confidence=0.8,
         evidence_refs=["manual-review"],
         model_used="test-model",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     active_graph = store.load_graph_version(run.active_graph_version_id)
     apply_decision(

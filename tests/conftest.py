@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import BaseModel
@@ -79,7 +79,7 @@ def make_request(
         acceptance_criteria=acceptance_criteria or [],
         deploy_authorized=deploy_authorized,
         budgets=Budgets(max_cost_usd=10.0, max_wall_seconds=3600),
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -131,7 +131,7 @@ def make_graph(
         tasks=tasks,
         edges=edges,
         created_by=created_by,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

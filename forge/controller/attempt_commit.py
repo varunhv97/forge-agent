@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List, Union
 
 
 class GitStateError(RuntimeError):
@@ -14,7 +13,7 @@ class GitStateError(RuntimeError):
     """
 
 
-def _run_git(repo_path: Union[str, Path], args: List[str]) -> subprocess.CompletedProcess:
+def _run_git(repo_path: str | Path, args: list[str]) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             ["git", "-C", str(repo_path), *args],
@@ -27,7 +26,7 @@ def _run_git(repo_path: Union[str, Path], args: List[str]) -> subprocess.Complet
         ) from exc
 
 
-def current_head(repo_path: Union[str, Path]) -> str:
+def current_head(repo_path: str | Path) -> str:
     """Returns the current commit SHA at `repo_path`'s HEAD."""
     result = _run_git(repo_path, ["rev-parse", "HEAD"])
     if result.returncode != 0:
@@ -35,7 +34,7 @@ def current_head(repo_path: Union[str, Path]) -> str:
     return result.stdout.strip()
 
 
-def commit_dirty_changes(repo_path: Union[str, Path], message: str) -> bool:
+def commit_dirty_changes(repo_path: str | Path, message: str) -> bool:
     """
     Commits whatever uncommitted changes exist at `repo_path`, if any. This
     is a safety net, not the primary expectation — a node's prompt always
@@ -62,9 +61,7 @@ def commit_dirty_changes(repo_path: Union[str, Path], message: str) -> bool:
     return True
 
 
-def changed_paths_between(
-    repo_path: Union[str, Path], old_commit: str, new_commit: str
-) -> List[str]:
+def changed_paths_between(repo_path: str | Path, old_commit: str, new_commit: str) -> list[str]:
     """Returns the paths that differ between `old_commit` and `new_commit`."""
     if old_commit == new_commit:
         return []

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 from pydantic import BaseModel, ValidationError

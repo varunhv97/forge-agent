@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from forge.controller.evidence_index import EvidenceIndex
@@ -38,7 +38,7 @@ class ModelEligibilityChecker(Protocol):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _latest_attempt_for_task(attempts: list[Attempt], task_id: str) -> Attempt | None:

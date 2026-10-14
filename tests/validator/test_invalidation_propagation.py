@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from forge.controller.evidence_index import EvidenceIndex
 from forge.controller.validator import propagate_invalidation
@@ -17,7 +17,7 @@ def _evidence(task_id: str, evidence_id: str) -> Evidence:
         passed=True,
         commit_sha="c1",
         raw_artifact_id="art-1",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 

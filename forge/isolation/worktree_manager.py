@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List
 
 from pydantic import BaseModel
 
@@ -39,7 +38,7 @@ class WorktreeError(RuntimeError):
     """
 
 
-def _run_git(repo_root: Path, args: List[str]) -> subprocess.CompletedProcess:
+def _run_git(repo_root: Path, args: list[str]) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             ["git", "-C", str(repo_root), *args],

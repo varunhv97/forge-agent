@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -55,8 +55,8 @@ def test_run_roundtrip_and_update(store: Store):
         request_id="req-1",
         active_graph_version_id="gv-1",
         status=RunStatus.ACTIVE,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
     store.save_run(run)
     assert store.load_run(run.id).status == RunStatus.ACTIVE
@@ -72,8 +72,8 @@ def test_update_missing_run_raises(store: Store):
         request_id="req-1",
         active_graph_version_id="gv-1",
         status=RunStatus.ACTIVE,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
     )
     with pytest.raises(NotFoundError):
         store.update_run(run)
@@ -105,7 +105,7 @@ def test_record_attempt_result_updates_attempt_and_inserts_evidence_atomically(s
         passed=True,
         commit_sha="",
         raw_artifact_id=attempt.id,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     store.record_attempt_result(attempt, [evidence])
 
@@ -127,7 +127,7 @@ def test_record_attempt_result_on_missing_attempt_raises_and_inserts_nothing(sto
         passed=True,
         commit_sha="",
         raw_artifact_id=attempt.id,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     with pytest.raises(NotFoundError):
         store.record_attempt_result(attempt, [evidence])
@@ -141,13 +141,13 @@ def test_trace_events_ordered_by_creation(store: Store):
         id="tev-1",
         run_id="run-1",
         event_type="a",
-        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     second = TraceEvent(
         id="tev-2",
         run_id="run-1",
         event_type="b",
-        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
     )
     store.append_trace_event(second)
     store.append_trace_event(first)

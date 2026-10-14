@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -13,7 +13,7 @@ from forge.models.decision import DecisionAction, DecisionProposal
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _fake_proposal(action=DecisionAction.SCHEDULE_ELIGIBLE) -> DecisionProposal:

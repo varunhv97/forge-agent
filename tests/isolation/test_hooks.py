@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 
-import pytest
-
 from forge.isolation.hooks import ToolCallEvent, build_pretooluse_hook
 from forge.models.permissions import PermissionProfile
 

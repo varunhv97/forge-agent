@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from forge.adapters.deploy.vercel_adapter import (
     DeploymentResult,
     VercelAuthenticationError,

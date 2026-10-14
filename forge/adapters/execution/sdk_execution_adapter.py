@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 from claude_agent_sdk import query as sdk_query
@@ -71,8 +72,8 @@ def hook_json_output_from_decision(decision: HookDecision) -> dict[str, Any]:
 
 def make_pretooluse_hook_callback(
     policy: PreToolUseHook,
-    decision_log: Optional[list[DecisionLogEntry]] = None,
-) -> Callable[[dict[str, Any], Optional[str], dict[str, Any]], Awaitable[dict[str, Any]]]:
+    decision_log: list[DecisionLogEntry] | None = None,
+) -> Callable[[dict[str, Any], str | None, dict[str, Any]], Awaitable[dict[str, Any]]]:
     """
     Wraps a policy-engine hook (`ToolCallEvent -> HookDecision`, built by
     `forge.isolation.hooks.build_pretooluse_hook`) as a Claude Agent SDK
@@ -87,7 +88,7 @@ def make_pretooluse_hook_callback(
 
     async def callback(
         hook_input: dict[str, Any],
-        _tool_use_id: Optional[str],
+        _tool_use_id: str | None,
         _context: dict[str, Any],
     ) -> dict[str, Any]:
         event = tool_call_event_from_hook_input(hook_input)
@@ -104,8 +105,8 @@ def build_claude_agent_options(
     profile: PermissionProfile,
     worktree_path: str,
     model: str,
-    max_turns: Optional[int] = None,
-    decision_log: Optional[list[DecisionLogEntry]] = None,
+    max_turns: int | None = None,
+    decision_log: list[DecisionLogEntry] | None = None,
 ) -> ClaudeAgentOptions:
     """
     Builds the `ClaudeAgentOptions` for one execution attempt: scoped to its
@@ -158,7 +159,7 @@ async def run_execution_attempt(
     profile: PermissionProfile,
     worktree_path: str,
     model: str,
-    max_turns: Optional[int] = None,
+    max_turns: int | None = None,
 ) -> ExecutionResult:
     """
     Runs one execution node's prompt through a live Claude Agent SDK

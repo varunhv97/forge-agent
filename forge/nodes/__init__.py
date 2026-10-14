@@ -99,9 +99,9 @@ def _manual_test_build_input(
 def register_all(
     node_registry: NodeTypeRegistry,
     permission_registry: PermissionProfileRegistry,
-    mechanical_registry: Optional[MechanicalRunnerRegistry] = None,
-    execution_handler_registry: Optional[ExecutionHandlerRegistry] = None,
-    deploy_adapter: Optional[VercelDeployAdapter] = None,
+    mechanical_registry: MechanicalRunnerRegistry | None = None,
+    execution_handler_registry: ExecutionHandlerRegistry | None = None,
+    deploy_adapter: VercelDeployAdapter | None = None,
 ) -> None:
     """
     Register every node type and permission profile defined in this package

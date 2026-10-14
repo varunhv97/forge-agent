@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import List
 from unittest.mock import patch
 
 import pytest
@@ -25,9 +24,9 @@ def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subproces
 
 def test_launch_container_builds_expected_args_with_network_disallowed(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktree"
-    captured: List[List[str]] = []
+    captured: list[list[str]] = []
 
-    def fake_run(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         captured.append(args)
         return _completed(0, stdout="abc123\n")
 
@@ -59,9 +58,9 @@ def test_launch_container_builds_expected_args_with_network_disallowed(tmp_path:
 
 def test_launch_container_builds_expected_args_with_network_allowed(tmp_path: Path) -> None:
     worktree_path = tmp_path / "worktree"
-    captured: List[List[str]] = []
+    captured: list[list[str]] = []
 
-    def fake_run(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         captured.append(args)
         return _completed(0, stdout="def456\n")
 
@@ -104,12 +103,16 @@ def test_launch_container_raises_docker_unavailable_when_binary_missing(tmp_path
 
 
 def test_launch_container_raises_container_error_on_nonzero_exit(tmp_path: Path) -> None:
-    with patch(
-        "subprocess.run",
-        return_value=_completed(1, stderr="Unable to find image 'forge-sandbox:latest' locally"),
+    with (
+        patch(
+            "subprocess.run",
+            return_value=_completed(
+                1, stderr="Unable to find image 'forge-sandbox:latest' locally"
+            ),
+        ),
+        pytest.raises(ContainerError, match="Unable to find image"),
     ):
-        with pytest.raises(ContainerError, match="Unable to find image"):
-            launch_container(tmp_path / "worktree")
+        launch_container(tmp_path / "worktree")
 
 
 def test_launch_container_raises_container_error_when_no_id_printed(tmp_path: Path) -> None:
@@ -134,12 +137,14 @@ def test_stop_container_succeeds_silently_when_already_gone() -> None:
 def test_stop_container_raises_container_error_for_other_failures() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
 
-    with patch(
-        "subprocess.run",
-        return_value=_completed(1, stderr="Cannot connect to the Docker daemon"),
+    with (
+        patch(
+            "subprocess.run",
+            return_value=_completed(1, stderr="Cannot connect to the Docker daemon"),
+        ),
+        pytest.raises(ContainerError, match="Cannot connect to the Docker daemon"),
     ):
-        with pytest.raises(ContainerError, match="Cannot connect to the Docker daemon"):
-            stop_container(handle)
+        stop_container(handle)
 
 
 def test_stop_container_raises_docker_unavailable_when_binary_missing() -> None:
@@ -152,9 +157,9 @@ def test_stop_container_raises_docker_unavailable_when_binary_missing() -> None:
 
 def test_exec_in_container_builds_expected_args_and_returns_result() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
-    captured: List[List[str]] = []
+    captured: list[list[str]] = []
 
-    def fake_run(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         captured.append(args)
         return _completed(0, stdout="hello\n", stderr="")
 
@@ -167,9 +172,9 @@ def test_exec_in_container_builds_expected_args_and_returns_result() -> None:
 
 def test_exec_in_container_uses_custom_cwd() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
-    captured: List[List[str]] = []
+    captured: list[list[str]] = []
 
-    def fake_run(args: List[str], **kwargs) -> subprocess.CompletedProcess:
+    def fake_run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
         captured.append(args)
         return _completed(0)
 
@@ -196,12 +201,16 @@ def test_exec_in_container_returns_result_reflecting_nonzero_inner_exit() -> Non
 def test_exec_in_container_raises_container_error_when_container_gone() -> None:
     handle = ContainerHandle(container_id="abc123", worktree_path="/tmp/worktree")
 
-    with patch(
-        "subprocess.run",
-        return_value=_completed(1, stderr="Error response from daemon: No such container: abc123"),
+    with (
+        patch(
+            "subprocess.run",
+            return_value=_completed(
+                1, stderr="Error response from daemon: No such container: abc123"
+            ),
+        ),
+        pytest.raises(ContainerError, match="No such container"),
     ):
-        with pytest.raises(ContainerError, match="No such container"):
-            exec_in_container(handle, ["echo", "hi"])
+        exec_in_container(handle, ["echo", "hi"])
 
 
 def test_exec_in_container_raises_docker_unavailable_when_binary_missing() -> None:
