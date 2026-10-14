@@ -20,7 +20,7 @@ by controller code; LLMs only produce proposals the controller validates.
 - 16 other modes are a named backlog only — no template/graph detail until
   we pick one up and discuss it first.
 
-## Key decisions already made (see the plan doc for full rationale)
+## Key decisions
 
 1. Execution nodes run via Claude Agent SDK or Codex CLI; decision nodes
    always run via direct Anthropic API calls with forced JSON-schema output.

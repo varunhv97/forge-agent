@@ -166,9 +166,9 @@ async def run_execution_attempt(
 
     This makes a real call to the Anthropic API via the bundled Claude Code
     CLI subprocess and therefore requires network access and either
-    `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session — neither
-    is available in this project's own sandboxed development environment,
-    which is why this function has no accompanying live-call test. Every
+    `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session, which is
+    why this function has no accompanying live-call test in the offline
+    suite (`scripts/live_smoke_test.py` exercises it live). Every
     other piece of this module (the translation functions and
     `build_claude_agent_options`) is tested without the network, since
     they're pure logic over plain data. This function's job is only to wire

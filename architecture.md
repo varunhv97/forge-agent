@@ -1,6 +1,7 @@
 # Architecture
 
-Full detail: the plan doc (linked from `CLAUDE.md`). This is the quick map.
+A quick map of the system. See `requirements.md` for scope and `tasks.md`
+for progress.
 
 ## Three artifacts, one authority
 
@@ -226,19 +227,18 @@ budget spent, one attempt then `BLOCKED_AWAITING_INPUT`. This generalizes
 beyond deploy_exec: any mechanical node can opt into the same fast path by
 setting the flag on its own `MechanicalResult`.
 
-**Known gaps:** `scripts/live_smoke_test.py` has now been run successfully
-by the user with real credentials (a basic `implement_exec` →
-`unit_verify_exec` run, `completed_verified`) — EXECUTION dispatch and the
-PreToolUse hook path are confirmed working live, end to end. Not yet
-exercised live: a hook actually *denying* a disallowed tool call (the
-smoke test's task never attempted one). The commit-based automatic
-invalidation rule (`invalidation.py`) now has real commits available to
-feed it (EXECUTION dispatch produces them for real as of M6) but isn't
-wired into the scheduler yet — that's open work, not a sandbox limitation.
-Neither Docker nor the Codex CLI is installed in this sandbox, so that
-path is still tested entirely by mocking `subprocess.run`, and its JSONL
-event-schema assumption is still an unverified best guess. All are built and
-tested as thoroughly as this sandbox allows.
+**Known gaps:**
+
+- `scripts/live_smoke_test.py` has run successfully with real credentials
+  (`implement_exec` → `unit_verify_exec`, `completed_verified`), so
+  EXECUTION dispatch and the PreToolUse hook path work live end to end. A
+  hook actually *denying* a disallowed tool call has not been exercised
+  live yet (the smoke test's task never attempted one).
+- The commit-based automatic invalidation rule (`invalidation.py`) has real
+  commits to work with as of M6 but is not wired into the scheduler yet.
+- The Docker/Codex CLI path is tested only by mocking `subprocess.run`, and
+  its JSONL event-schema assumption has not been checked against a real
+  `codex exec --json` run.
 
 ## Status
 

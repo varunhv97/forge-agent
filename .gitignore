@@ -1,6 +1,4 @@
 .venv/
-.gh-bin
-.gh-config/
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -10,7 +8,6 @@ forge.db-wal
 forge.db-shm
 artifacts/
 .DS_Store
-.runtimes/
 .claude/worktrees/
 .env.local
 CLAUDE.local.md

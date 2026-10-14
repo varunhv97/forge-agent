@@ -147,8 +147,8 @@ def parse_codex_jsonl(stdout: str) -> tuple[list[dict], str | None]:
     parsed as JSON independently, every successfully-parsed object is kept
     in order, and any line that fails to parse (or does not parse to a JSON
     object) is silently skipped rather than raising. This is deliberately
-    tolerant because the exact event schema cannot be verified against a
-    live Codex install in this environment.
+    tolerant because the exact event schema has not yet been verified
+    against a live Codex install.
 
     Returns `(events, final_message)`, where `final_message` is the
     best-effort extraction documented on `_extract_final_message`.

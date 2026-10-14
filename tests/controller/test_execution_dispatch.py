@@ -70,7 +70,7 @@ def test_implement_then_unit_verify_completes_end_to_end(store: Store, repo_root
     The real worktree lifecycle, start to finish, with no mocking below the
     execution-runner boundary: a real git repo, a real worktree created by
     worktree_manager, a fake runner standing in for the LLM session (the
-    only thing this sandbox can't exercise live), real git commit/diff
+    only thing the offline suite can't exercise live), real git commit/diff
     deriving result_commit and changed_paths, and a real `pytest -q`
     subprocess verifying the result in that exact worktree.
     """

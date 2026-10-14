@@ -10,9 +10,8 @@ subprocess verifies the result.
 
 This needs an authenticated `claude` CLI session (the same one your
 interactive terminal already uses — if `claude` works for you normally,
-this should too) and cannot run inside Forge's own sandboxed development
-environment, which has no access to that authentication. Run it from your
-own terminal.
+this should too), so it is not part of the offline test suite. Run it
+from your own terminal.
 
 Usage:
     source .venv/bin/activate

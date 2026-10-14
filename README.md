@@ -113,6 +113,8 @@ Known gaps, as of today:
 - M7 has deployed for real and the deployed endpoint returns the expected
   response. A fully green run that includes `manual_test_exec` hasn't been
   confirmed yet.
+- A PreToolUse hook denying a disallowed tool call is covered by offline
+  tests but hasn't been exercised in a live session yet.
 - The Codex/Docker path is tested only with mocked subprocesses and has not
   been run against real binaries. Live dispatch currently uses the Claude
   Agent SDK only.

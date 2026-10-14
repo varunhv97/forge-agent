@@ -17,7 +17,7 @@ This needs:
     scripts/live_smoke_test.py).
   - A `VERCEL_TOKEN` in `.env.local` at the repo root (gitignored).
 
-Run it from your own terminal, not from Forge's sandboxed dev environment:
+Run it from your own terminal:
 
     source .venv/bin/activate
     python scripts/live_feature_blast_m7.py
