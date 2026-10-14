@@ -13,3 +13,4 @@ artifacts/
 .runtimes/
 .claude/worktrees/
 .env.local
+CLAUDE.local.md
