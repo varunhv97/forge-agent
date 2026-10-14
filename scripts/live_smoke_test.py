@@ -39,7 +39,11 @@ from forge.controller.execution_registry import ExecutionHandlerRegistry  # noqa
 from forge.controller.mechanical import MechanicalRunnerRegistry  # noqa: E402
 from forge.controller.model_registry import ModelRegistry  # noqa: E402
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry  # noqa: E402
-from forge.controller.scheduler import ControllerDependencies, run_to_completion, start_run  # noqa: E402
+from forge.controller.scheduler import (
+    ControllerDependencies,
+    run_to_completion,
+    start_run,
+)  # noqa: E402
 from forge.controller.store import Store  # noqa: E402
 from forge.models.common import NodeKind  # noqa: E402
 from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec  # noqa: E402
@@ -49,8 +53,7 @@ from forge.models.run import RunStatus  # noqa: E402
 from forge.nodes import register_all  # noqa: E402
 
 DEFAULT_OBJECTIVE = (
-    "Create math_utils.py with a function add(a, b) that returns a + b, "
-    "and a unit test for it."
+    "Create math_utils.py with a function add(a, b) that returns a + b, " "and a unit test for it."
 )
 
 
@@ -152,9 +155,7 @@ def main() -> int:
     result = run_to_completion(run.id, store, deps, max_ticks=20)
 
     print(f"Final run status: {result.status.value}")
-    for attempt in sorted(
-        store.load_attempts(run.id), key=lambda a: (a.task_id, a.attempt_number)
-    ):
+    for attempt in sorted(store.load_attempts(run.id), key=lambda a: (a.task_id, a.attempt_number)):
         print(
             f"  {attempt.task_id} attempt#{attempt.attempt_number}: {attempt.status.value} "
             f"(worktree={attempt.worktree_path or '-'})"
