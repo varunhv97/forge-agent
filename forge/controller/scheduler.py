@@ -1,3 +1,30 @@
+"""
+The controller's scheduling loop: the only code that turns a validated
+graph plus its attempt history into new attempts and run-status changes.
+
+`run_to_completion` first reconciles attempts orphaned by a crashed prior
+process, then calls `controller_tick` until the run is terminal or stalled.
+Each tick:
+
+1. Readiness — `_ready_tasks` finds tasks whose dependencies have passed and
+   whose latest attempt is absent, CANCELLED or SUPERSEDED (a FAILED task is
+   only ever retried via a decision; EXECUTION tasks are only ready when a
+   runner is configured).
+2. Dispatch — MECHANICAL tasks go to `dispatch_mechanical_attempt`
+   (deterministic runner, no LLM); EXECUTION tasks go to
+   `dispatch_execution_attempt` (real worktree, adapter call, then
+   `result_commit`/`changed_paths` derived from git, not from the node).
+3. Failure resolution — `_resolve_failed_tasks` drives each failing task
+   through a `retry_or_escalate_policy` decision (or straight to
+   REQUEST_USER_INPUT when the runner flagged the failure unrecoverable);
+   proposals only take effect via `apply_decision`.
+4. Gate checks — a required task whose latest attempt is still FAILED after
+   resolution fails the run (FAILED_EXHAUSTED); otherwise
+   `all_required_gates_met` is re-derived from stored evidence.
+5. Completion — the run becomes COMPLETED_VERIFIED only from that check,
+   never from a node's or decision's own claim of success.
+"""
+
 from __future__ import annotations
 
 import json
