@@ -596,6 +596,13 @@ class LiveRunScreen(Screen[None]):
         self.query_one("#run-header", Static).update(header_text)
 
         table = self.query_one("#tasks-table", DataTable)
+        # `clear()` resets the cursor to row 0, which would otherwise yank
+        # a user's navigation position back to the top on every 0.75s poll
+        # tick (and race with a keypress landing in the same window — this
+        # is what made a pan/zoom-gating test intermittently see a "down"
+        # press appear to do nothing). Save and restore it across the
+        # rebuild instead, clamped to however many rows actually exist.
+        previous_cursor_row = table.cursor_row
         table.clear()
         for task in graph.tasks:
             status = statuses[task.id]
@@ -607,6 +614,8 @@ class LiveRunScreen(Screen[None]):
                 Text(status, style=_status_style(colors, status)),
                 attempt_label,
             )
+        if table.row_count:
+            table.move_cursor(row=min(previous_cursor_row, table.row_count - 1))
 
         report = build_trace_report(app.store, self.run_id)
         lines = report.split("\n")
