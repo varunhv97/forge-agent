@@ -92,8 +92,9 @@ Commit messages hold the full history; this file is a short index.
 
 - [ ] **M9: Interactive TUI shell, per-project state, user-authored custom
       DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
-      live-run/resume — also done; DAG view and visual builder still not
-      started).** Scope settled via mockups and discussion. The first pass
+      live-run/resume — also done; phase 3 — the DAG view on the live-run
+      screen — also done; visual builder still not started).** Scope
+      settled via mockups and discussion. The first pass
       was everything buildable and fully testable as plain Python/CLI;
       this second pass is the actual Textual shell on top of it.
       Done (phase 1 — non-TUI engine wiring):
@@ -219,19 +220,75 @@ Commit messages hold the full history; this file is a short index.
         run → `COMPLETED_VERIFIED` → dashboard → run summary → theme
         toggle, with an SVG screenshot saved at each step.
 
-      **Remaining:** a topological DAG-layout function and the DAG view
-      itself (zoom/zoom-in-with-pan, overview minimap — this phase is
-      list-view-only, explicitly out of scope here), a visual
-      keyboard-driven DAG builder that writes the same
-      `.forge/dags/*.json` files `custom_dag.py` already loads, and
-      `forge/cli.py` moving from returning strings to structured data so
-      the TUI and plain-text commands share one data layer (the TUI
-      currently reuses `forge/cli.py`'s string-building functions —
-      `build_trace_report`/`build_inspect_report` — directly, plus two of
-      its underlying private helpers, `_latest_attempts_by_task`/
-      `_task_status`, rather than that refactor). Mid-run chat into a live
-      EXECUTION session is still the biggest open risk in the whole
-      milestone, sized separately — see Known gaps.
+      Done (phase 3 — the DAG view on the live-run screen):
+      - `forge/tui/dag_layout.py`: `compute_dag_layout(tasks, edges) ->
+        DagLayout`, a pure function with zero Textual imports. `rank` is
+        the longest path from a root (a task with no incoming
+        `"dependency"` edge) — this is what spreads a fan-out/fan-in
+        shape like `implement_exec -> {unit_verify_exec,
+        integration_test_write_exec -> integration_verify_exec} ->
+        deploy_exec -> manual_test_exec` across ranks correctly (both
+        fan-out branches land at the same rank; the fan-in task's rank is
+        forced past whichever branch is longer). `lane` is a task's
+        simple, deterministic position within its rank — the order tasks
+        appear in `GraphVersion.tasks`, no crossing-minimization attempted.
+        Computed once per `GraphVersion.id`, cached by `LiveRunScreen`
+        rather than recomputed every poll tick. `DagLayoutError` guards
+        against a cycle rather than assuming `compile_and_validate` always
+        ran first, since this module stands on its own.
+      - `forge/tui/dag_canvas.py`: `render_dag_canvas(tasks, edges,
+        layout, statuses, style_for_status) -> rich.text.Text` — a 2D
+        character-grid renderer (box-drawing/Unicode line characters, not
+        SVG/pixels). Each task becomes a 3-row box (border/`● id`/border);
+        edges route through the gap columns between ranks, with a stub,
+        one vertical run, and a stub for a lane change, and otherwise a
+        flat horizontal line. Every grid write only lands on a still-blank
+        cell, so a multi-rank edge "flying over" an intervening rank's box
+        just stops drawing across that box's footprint rather than
+        corrupting it. Colors come from `style_for_status`, a callback the
+        caller builds from the exact same `screens._status_style`/
+        `App.get_css_variables()` the list view already uses — this
+        module never picks its own colors.
+      - `LiveRunScreen` (`forge/tui/screens.py`) now renders both a
+        `#list-view` (the original table + trace tail) and a `#graph-view`
+        (the new canvas, in a `VerticalScroll` so Textual's own scrolling
+        covers a graph wider than the terminal — no zoom/pan built here,
+        deliberately), toggled by a new `g` binding ("Graph view") off the
+        *same* `refresh_run` poll tick — both are kept current every tick
+        regardless of which is visible, so toggling never shows stale
+        data.
+      - Tests: `tests/tui/test_dag_layout.py` (linear chain, the exact
+        fan-out/fan-in shape above, disconnected roots, `context_only`
+        edges not affecting rank, cycle detection) and
+        `tests/tui/test_dag_canvas.py` (box/border/glyph presence, a
+        vertical run on a lane change, status style actually applied to
+        a span, the empty-graph placeholder) — pure unit tests, no
+        Textual. `tests/tui/test_app.py` adds two real `Pilot` tests: `g`
+        toggling list/graph view mid-run and after completion on the
+        existing two-task custom DAG, and a new fan-out-only custom DAG
+        fixture (`tests/tui/conftest.py`'s `write_branching_dag` —
+        `implement_exec -> {unit_verify_exec, integration_test_write_exec
+        -> integration_verify_exec}`, no `deploy_exec`/network) run real
+        end to end to confirm the canvas actually shows every task id
+        after `COMPLETED_VERIFIED`. Also visually confirmed outside the
+        test suite via Textual's headless-driver screenshot (same
+        approach phase 2 used, since this sandbox has no real pty): the
+        rendered SVG shows all four boxes, the fan-out connector, and the
+        new `g Graph view` footer hint.
+
+      **Remaining:** zoom and zoom-in-with-pan with an overview minimap
+      for a graph wider than the terminal (this phase is deliberately
+      clip-or-scroll-only), a visual keyboard-driven DAG builder that
+      writes the same `.forge/dags/*.json` files `custom_dag.py` already
+      loads, and `forge/cli.py` moving from returning strings to
+      structured data so the TUI and plain-text commands share one data
+      layer (the TUI currently reuses `forge/cli.py`'s string-building
+      functions — `build_trace_report`/`build_inspect_report` — directly,
+      plus two of its underlying private helpers,
+      `_latest_attempts_by_task`/`_task_status`, rather than that
+      refactor). Mid-run chat into a live EXECUTION session is still the
+      biggest open risk in the whole milestone, sized separately — see
+      Known gaps.
 
 Everything after M9 (other execution-runtime adapters, modes beyond
 custom-DAG templates) is backlog. See `requirements.md`.

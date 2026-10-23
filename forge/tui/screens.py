@@ -49,6 +49,8 @@ from forge.cli import (
 from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
 from forge.modes.custom_dag import CustomDagError, DagTemplateInfo
+from forge.tui.dag_canvas import render_dag_canvas
+from forge.tui.dag_layout import DagLayout, compute_dag_layout
 
 if TYPE_CHECKING:
     from forge.tui.app import ForgeApp
@@ -423,11 +425,19 @@ class NewSessionScreen(Screen[None]):
 
 class LiveRunScreen(Screen[None]):
     """
-    The live, flat task list + trace tail for one run. Polls `self.app
-    .store` (read-only) on a timer — the run itself progresses on its own
-    `RunWorker` background thread (`forge/tui/runner.py`), started by
-    `ForgeApp.open_run` before this screen is pushed. `d` pops back to the
-    dashboard without touching that thread at all; the run keeps going.
+    The live view for one run. Polls `self.app.store` (read-only) on a
+    timer — the run itself progresses on its own `RunWorker` background
+    thread (`forge/tui/runner.py`), started by `ForgeApp.open_run` before
+    this screen is pushed. `d` pops back to the dashboard without touching
+    that thread at all; the run keeps going.
+
+    Two renderings of the exact same poll tick's data, toggled with `g`:
+    the original flat task list + trace tail (`#list-view`), and a DAG
+    canvas (`#graph-view`, `forge/tui/dag_canvas.py`) laid out once per
+    graph version (`forge/tui/dag_layout.py` — the shape doesn't change
+    mid-run) and re-rendered every tick with each task's current status.
+    Both containers are kept up to date every tick regardless of which is
+    visible, so toggling never shows stale content.
     """
 
     DEFAULT_CSS = """
@@ -436,7 +446,7 @@ class LiveRunScreen(Screen[None]):
         height: auto;
         border-bottom: solid $primary;
     }
-    LiveRunScreen #live-body {
+    LiveRunScreen #list-view {
         height: 1fr;
     }
     LiveRunScreen #tasks-table {
@@ -446,8 +456,16 @@ class LiveRunScreen(Screen[None]):
         width: 55%;
         border-left: solid $panel;
     }
+    LiveRunScreen #graph-view {
+        height: 1fr;
+    }
+    LiveRunScreen #dag-canvas {
+        padding: 1 2;
+        width: auto;
+    }
     """
     BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("g", "toggle_graph_view", "Graph view"),
         Binding("d", "back_to_dashboard", "Dashboard (run keeps going)"),
         Binding("q", "quit_app", "Quit"),
     ]
@@ -456,18 +474,24 @@ class LiveRunScreen(Screen[None]):
         super().__init__()
         self.run_id = run_id
         self._trace_lines_written = 0
+        self._showing_graph = False
+        self._layout: DagLayout | None = None
+        self._layout_graph_version_id: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="run-header")
-        with Horizontal(id="live-body"):
+        with Horizontal(id="list-view"):
             yield DataTable(id="tasks-table", cursor_type="row")
             yield RichLog(id="trace-log", wrap=True, highlight=False, markup=False)
+        with VerticalScroll(id="graph-view"):
+            yield Static("", id="dag-canvas")
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#tasks-table", DataTable)
         table.add_columns("TASK", "NODE TYPE", "STATUS", "ATTEMPT")
+        self.query_one("#graph-view").display = False
         self.refresh_run()
         self.set_interval(0.75, self.refresh_run)
 
@@ -481,6 +505,7 @@ class LiveRunScreen(Screen[None]):
         attempts = app.store.load_attempts(self.run_id)
         latest_by_task = _latest_attempts_by_task(attempts)
         colors = app.get_css_variables()
+        statuses = {task.id: _task_status(task, latest_by_task) for task in graph.tasks}
 
         elapsed = datetime.now(UTC) - run.created_at
         header_text = Text()
@@ -496,7 +521,7 @@ class LiveRunScreen(Screen[None]):
         table = self.query_one("#tasks-table", DataTable)
         table.clear()
         for task in graph.tasks:
-            status = _task_status(task, latest_by_task)
+            status = statuses[task.id]
             attempt = latest_by_task.get(task.id)
             attempt_label = f"#{attempt.attempt_number}" if attempt is not None else "-"
             table.add_row(
@@ -513,6 +538,23 @@ class LiveRunScreen(Screen[None]):
             for line in lines[self._trace_lines_written :]:
                 log.write(line)
             self._trace_lines_written = len(lines)
+
+        if self._layout is None or self._layout_graph_version_id != graph.id:
+            self._layout = compute_dag_layout(graph.tasks, graph.edges)
+            self._layout_graph_version_id = graph.id
+        canvas_text = render_dag_canvas(
+            graph.tasks,
+            graph.edges,
+            self._layout,
+            statuses,
+            lambda status: _status_style(colors, status),
+        )
+        self.query_one("#dag-canvas", Static).update(canvas_text)
+
+    def action_toggle_graph_view(self) -> None:
+        self._showing_graph = not self._showing_graph
+        self.query_one("#list-view").display = not self._showing_graph
+        self.query_one("#graph-view").display = self._showing_graph
 
     def action_back_to_dashboard(self) -> None:
         self.app.pop_screen()

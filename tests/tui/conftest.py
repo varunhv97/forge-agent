@@ -70,6 +70,69 @@ def write_dag(repo_root: Path, name: str = "implement-and-verify") -> None:
     (dags_dir / f"{name}.json").write_text(json.dumps(DAG_DEFINITION))
 
 
+# A fan-out custom DAG (no network, no deploy_exec/manual_test_exec) for
+# exercising the DAG view's rendering of a real branching shape end to
+# end: implement feeds both unit_verify and the integration_write ->
+# integration_verify chain, so unit_verify and integration_write land at
+# the same rank while integration_verify lands one rank further out.
+BRANCHING_DAG_DEFINITION = {
+    "schema_version": 1,
+    "name": "fan-out-verify",
+    "description": "{{ objective }}",
+    "inputs": [{"name": "objective", "prompt": "What should implement_exec build?"}],
+    "acceptance_criteria": [
+        {
+            "id": "unit_tests_pass",
+            "description": "unit tests pass",
+            "verification_method": "automated_test",
+            "required": True,
+        },
+        {
+            "id": "integration_tests_pass",
+            "description": "integration tests pass",
+            "verification_method": "automated_test",
+            "required": True,
+        },
+    ],
+    "tasks": [
+        {
+            "id": "implement",
+            "node_type": "implement_exec",
+            "description": "{{ objective }}",
+            "depends_on": [],
+            "acceptance_criterion_ids": [],
+        },
+        {
+            "id": "unit_verify",
+            "node_type": "unit_verify_exec",
+            "description": "run the unit tests implement wrote",
+            "depends_on": ["implement"],
+            "acceptance_criterion_ids": ["unit_tests_pass"],
+        },
+        {
+            "id": "integration_write",
+            "node_type": "integration_test_write_exec",
+            "description": "write integration tests",
+            "depends_on": ["implement"],
+            "acceptance_criterion_ids": [],
+        },
+        {
+            "id": "integration_verify",
+            "node_type": "integration_verify_exec",
+            "description": "run the integration tests integration_write wrote",
+            "depends_on": ["integration_write"],
+            "acceptance_criterion_ids": ["integration_tests_pass"],
+        },
+    ],
+}
+
+
+def write_branching_dag(repo_root: Path, name: str = "fan-out-verify") -> None:
+    dags_dir = repo_root / ".forge" / "dags"
+    dags_dir.mkdir(parents=True, exist_ok=True)
+    (dags_dir / f"{name}.json").write_text(json.dumps(BRANCHING_DAG_DEFINITION))
+
+
 def fake_execution_runner(
     model: str, prompt: str, profile: object, worktree_path: str
 ) -> ExecutionRunOutcome:

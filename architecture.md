@@ -165,13 +165,40 @@ forge/
                     threads; the only writer of run state once a run is
                     live, same as forge run/resume already are
     screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
-                    RunSummaryScreen/ConfirmModal — list-view only (no DAG
-                    view yet). Reuse forge/cli.py's build_trace_report/
-                    build_inspect_report (and two of its private helpers,
-                    _latest_attempts_by_task/_task_status) rather than
-                    re-deriving status data; status text is colored via
-                    the active theme's own $success/$warning/$error
-                    variables, never hand-rolled hex
+                    RunSummaryScreen/ConfirmModal. Reuse forge/cli.py's
+                    build_trace_report/build_inspect_report (and two of
+                    its private helpers, _latest_attempts_by_task/
+                    _task_status) rather than re-deriving status data;
+                    status text is colored via the active theme's own
+                    $success/$warning/$error variables, never hand-rolled
+                    hex. LiveRunScreen renders two views of the same poll
+                    tick's data, toggled with `g`: the original flat task
+                    table + trace tail, and a DAG canvas (#graph-view, in
+                    a VerticalScroll so Textual's own scrolling covers a
+                    graph wider than the terminal — no zoom/pan here).
+    dag_layout.py   compute_dag_layout(tasks, edges) -> DagLayout — pure,
+                    zero Textual imports. rank = longest path from a root
+                    (no incoming "dependency" edge), which spreads a
+                    fan-out/fan-in shape (e.g. implement_exec ->
+                    {unit_verify_exec, integration_test_write_exec ->
+                    integration_verify_exec} -> deploy_exec) across ranks
+                    correctly; lane is a task's simple, deterministic
+                    position within its rank (tasks' own list order, no
+                    crossing-minimization). Computed once per
+                    GraphVersion.id and cached by LiveRunScreen, not
+                    recomputed every poll tick.
+    dag_canvas.py   render_dag_canvas(tasks, edges, layout, statuses,
+                    style_for_status) -> rich.text.Text — a 2D character
+                    grid (box-drawing/Unicode lines, not SVG/pixels): a
+                    3-row box per task, edges routed through the gap
+                    columns between ranks (a stub, a vertical run, a stub
+                    for a lane change). Every grid write only lands on a
+                    still-blank cell, so a multi-rank edge flying over an
+                    intervening rank's box stops drawing across that
+                    box's footprint instead of corrupting it. Colors come
+                    from the caller's style_for_status (built from
+                    screens._status_style/App.get_css_variables()) — this
+                    module never picks its own colors.
 ```
 
 ## Resumability

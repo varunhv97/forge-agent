@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import pytest
+from rich.text import Text
+from textual.widgets import Static
 
 from forge import project
 from forge.controller import db
@@ -28,7 +31,15 @@ from forge.tui.screens import (
     NewSessionScreen,
     RunSummaryScreen,
 )
-from tests.tui.conftest import fake_execution_runner, write_dag
+from tests.tui.conftest import fake_execution_runner, write_branching_dag, write_dag
+
+
+def _canvas_plain(static: Static) -> str:
+    """The DAG canvas's rendered plain text — `Static.content` is typed as
+    the broad `VisualType` union `.update()` accepts, but `LiveRunScreen`
+    only ever passes it a `render_dag_canvas` result, which is always a
+    `rich.text.Text`."""
+    return cast(Text, static.content).plain
 
 
 async def _wait_until(predicate: object, *, timeout: float = 10.0) -> None:
@@ -209,3 +220,85 @@ async def test_theme_defaults_light_and_toggles_dark(
         assert app.theme == "textual-dark"
         await pilot.press("t")
         assert app.theme == "textual-light"
+
+
+# -- live run: DAG view toggle -------------------------------------------------
+
+
+async def test_g_toggles_between_list_and_graph_view(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    monkeypatch.chdir(git_repo)
+    project.ensure_forge_dir(git_repo)
+    write_dag(git_repo)
+    monkeypatch.setattr(runner_module, "run_sdk_node", fake_execution_runner)
+
+    app = ForgeApp()
+    async with app.run_test() as pilot:
+        await _wait_until(lambda: isinstance(app.screen, NewSessionScreen))
+        await pilot.press("down", "enter")
+        await _wait_until(lambda: app.screen.query_one("#field-objective") is not None)
+        await pilot.click("#field-objective")
+        await pilot.press(*"build a tiny thing")
+        await pilot.click("#continue-button")
+        await _wait_until(lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await _wait_until(lambda: isinstance(app.screen, LiveRunScreen))
+        live_screen = app.screen
+        assert isinstance(live_screen, LiveRunScreen)
+
+        # List view is the default.
+        assert live_screen.query_one("#list-view").display is True
+        assert live_screen.query_one("#graph-view").display is False
+
+        await pilot.press("g")
+        assert live_screen.query_one("#list-view").display is False
+        assert live_screen.query_one("#graph-view").display is True
+        canvas = live_screen.query_one("#dag-canvas", Static)
+        plain = _canvas_plain(canvas)
+        assert "implement" in plain
+        assert "verify" in plain
+        # Box-drawing borders for both tasks' boxes, joined by a connector.
+        assert "┌" in plain
+        assert "┘" in plain
+        assert "─" in plain or "│" in plain
+
+        await pilot.press("g")
+        assert live_screen.query_one("#list-view").display is True
+        assert live_screen.query_one("#graph-view").display is False
+
+        run_id = live_screen.run_id
+        await _wait_until(lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED)
+
+
+async def test_graph_view_renders_a_branching_custom_dag(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    monkeypatch.chdir(git_repo)
+    project.ensure_forge_dir(git_repo)
+    write_branching_dag(git_repo)
+    monkeypatch.setattr(runner_module, "run_sdk_node", fake_execution_runner)
+
+    app = ForgeApp()
+    async with app.run_test() as pilot:
+        await _wait_until(lambda: isinstance(app.screen, NewSessionScreen))
+        await pilot.press("down", "enter")
+        await _wait_until(lambda: app.screen.query_one("#field-objective") is not None)
+        await pilot.click("#field-objective")
+        await pilot.press(*"build a tiny thing")
+        await pilot.click("#continue-button")
+        await _wait_until(lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await _wait_until(lambda: isinstance(app.screen, LiveRunScreen))
+        live_screen = app.screen
+        assert isinstance(live_screen, LiveRunScreen)
+        run_id = live_screen.run_id
+
+        await _wait_until(lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED)
+        await pilot.press("g")
+
+        plain = _canvas_plain(live_screen.query_one("#dag-canvas", Static))
+        for task_id in ("implement", "unit_verify", "integration_write", "integration_verify"):
+            assert task_id in plain
+        # The fan-out needs at least one vertical run to join a lane change.
+        assert "│" in plain
