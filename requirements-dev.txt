@@ -1,5 +1,6 @@
 -r requirements.txt
 pytest==8.4.2
+pytest-asyncio==1.4.0  # drives the Textual Pilot (`App.run_test()`) tests in tests/tui/
 black==25.11.0
 ruff==0.17.0
 mypy==2.4.0

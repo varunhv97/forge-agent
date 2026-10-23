@@ -22,12 +22,17 @@ a run in scope. See forge/cli.py:build_inspect_report's docstring.
 Installed as the `forge` console script (see pyproject.toml's
 [project.scripts]), so after an editable install this runs as:
 
+    forge                    # launches the interactive TUI (forge/tui/*)
     forge trace <run_id>
     forge inspect <run_id> [task_id]
     forge run <objective> --journey "<text>" --deploy-authorized \
         [--mode feature-blast|<custom-dag-name>] [--db PATH]
     forge resume <run_id>
     forge list
+
+Bare `forge` (no subcommand) hands off to `forge.tui.app.run_tui` — a
+full-screen Textual shell around the same `.forge/` discovery and
+run/resume machinery the one-shot commands above use.
 
 or, without installing, directly as `python scripts/forge_cli.py ...`.
 
@@ -72,6 +77,7 @@ from forge.modes.custom_dag import (
 )
 from forge.modes.feature_blast import build_feature_blast_request_and_graph
 from forge.nodes import register_all
+from forge.tui.app import run_tui
 
 DEFAULT_DB_PATH = Path("forge.db")
 # forge run's own default Budgets when none is configurable yet via a CLI
@@ -94,7 +100,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             f"cwd); for trace/inspect, defaults to '{DEFAULT_DB_PATH}'."
         ),
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # Not required: a bare `forge` (no subcommand at all) launches the
+    # interactive TUI instead (see main()) rather than erroring out of
+    # argparse with "the following arguments are required: command".
+    subparsers = parser.add_subparsers(dest="command", required=False)
 
     trace_parser = subparsers.add_parser(
         "trace", help="replay a run's full audit trail, in chronological order"
@@ -318,6 +327,11 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
+
+    if args.command is None:
+        # Bare `forge` (optionally with `--db`) launches the interactive
+        # TUI instead of printing argparse's help text.
+        return run_tui(args.db)
 
     if args.command == "run":
         return _cmd_run(args)

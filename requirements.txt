@@ -3,3 +3,4 @@ networkx==3.2.1
 eval_type_backport==0.4.0  # lets pydantic parse `X | None` syntax; harmless on 3.11+
 claude-agent-sdk==0.2.165  # requires Python >=3.10 — see CLAUDE.md's Environment section
 httpx==0.28.1  # async HTTP client; required for all outbound HTTP per project convention
+textual==8.2.8  # the interactive TUI shell (forge/tui/*); first dependency of its kind

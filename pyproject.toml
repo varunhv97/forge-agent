@@ -16,6 +16,7 @@ dependencies = [
     "eval_type_backport==0.4.0",
     "claude-agent-sdk==0.2.165",
     "httpx==0.28.1",
+    "textual==8.2.8",
 ]
 
 [project.scripts]
@@ -66,3 +67,8 @@ disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+# tests/tui/*'s Textual Pilot tests are plain `async def test_...` with no
+# per-test marker — asyncio_mode = "auto" is pytest-asyncio's own supported
+# way to run those without every other (sync) test in the suite needing
+# any change at all.
+asyncio_mode = "auto"

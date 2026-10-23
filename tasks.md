@@ -91,11 +91,12 @@ Commit messages hold the full history; this file is a short index.
       T20-exempt script that parses args and prints.
 
 - [ ] **M9: Interactive TUI shell, per-project state, user-authored custom
-      DAGs (non-TUI slice done; TUI itself not started).** Scope settled
-      via mockups and discussion. This first pass is deliberately
-      everything buildable and fully testable as plain Python/CLI today,
-      so the TUI pass that follows has a verified foundation under it.
-      Done:
+      DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
+      live-run/resume — also done; DAG view and visual builder still not
+      started).** Scope settled via mockups and discussion. The first pass
+      was everything buildable and fully testable as plain Python/CLI;
+      this second pass is the actual Textual shell on top of it.
+      Done (phase 1 — non-TUI engine wiring):
       - `Store.list_runs()` — every run, newest-updated first (sorted in
         Python, since `updated_at` lives inside the JSON blob rather than
         its own indexed column, unlike `graph_versions.version`).
@@ -142,17 +143,94 @@ Commit messages hold the full history; this file is a short index.
         real worktrees — no real `claude` CLI or Vercel call anywhere in
         the suite.
 
-      **Remaining:** the TUI itself (Textual, confirmed with the project
-      owner but not yet added as a dependency — still the first of its
-      kind in `pyproject.toml`), the scheduler tick loop moved to a
-      background thread with the TUI only ever reading `Store` (never a
-      second writer), a topological DAG-layout function for the graph
-      view (mockups used hand-placed coordinates), a visual
+      Done (phase 2 — the Textual shell itself, `forge/tui/*`):
+      - `textual==8.2.8` added to `pyproject.toml`/`requirements.txt`
+        (first dependency of its kind), plus `pytest-asyncio==1.4.0` in
+        `requirements-dev.txt` to drive `tests/tui/*`'s `App.run_test()`
+        (Pilot) tests. Bare `forge` (no subcommand — `scripts/forge_cli.py`
+        now makes the subparser optional) hands off to
+        `forge.tui.app.run_tui`.
+      - `ForgeApp` (`forge/tui/app.py`): resolves `.forge/` on startup via
+        the *exact same* `forge/project.py` discovery `forge run`/`resume`/
+        `list` already use — `NotAGitRepoError` now surfaces as a real
+        Textual modal (`ConfirmModal`, declining exits cleanly, nothing
+        created) instead of a bare `input()`. Owns exactly one read-only
+        `Store` every screen polls from, plus the `NodeTypeRegistry`/
+        `PermissionProfileRegistry` needed for `compile_and_validate` and
+        `build_inspect_report`. Defaults `self.theme = "textual-light"`
+        (Textual 8.2.8 defaults to `"textual-dark"` if left untouched,
+        confirmed empirically, not assumed) with a `t` binding to toggle
+        light/dark. `start_new_run` builds the request/graph through the
+        exact same `build_feature_blast_request_and_graph`/
+        `build_custom_dag_request_and_graph` + `compile_and_validate` +
+        `start_run` path `forge run` already uses — the one write the app
+        does directly, on the main thread, over its own short-lived
+        connection, before any background run exists. `open_run` starts a
+        `RunWorker` (or reuses an already-running one) for anything
+        ACTIVE/BLOCKED_AWAITING_INPUT, otherwise shows a static inspect
+        summary — this is also exactly what resuming an orphaned run
+        looks like, since `run_to_completion` reconciles orphaned attempts
+        itself; no separate "resume" code path exists.
+      - `RunWorker` (`forge/tui/runner.py`): one `threading.Thread` per
+        live run, opening its *own* SQLite connection
+        (`forge.controller.db.connect`, WAL mode) and driving the real
+        `run_to_completion` — never a `sqlite3.Connection` shared across
+        threads, never a second thing writing run state while it runs.
+        Wires the real registries via `register_all` and the real
+        `run_sdk_node` runner, same as `scripts/forge_cli.py`'s
+        `_cmd_run`/`_cmd_resume`.
+      - Four screens (`forge/tui/screens.py`), all reading the app's
+        read-only `Store` and otherwise only calling back into `ForgeApp`:
+        **Dashboard** (`Store.list_runs()` in a `DataTable`; empty state
+        shows "no runs yet" and auto-advances to New Session; `n`/`r`/`q`,
+        `enter` via `DataTable.RowSelected` since `DataTable` itself
+        already claims the `enter` key). **New Session** (`OptionList` of
+        Feature Blast + every `.forge/dags/*.json` found by the new
+        `list_dag_templates`/`DagTemplateInfo` helper in
+        `forge/modes/custom_dag.py`; a dynamically built `Input` form per
+        mode's declared fields; an explicit deploy-authorization
+        `ConfirmModal` that always defaults focus to "No"). **Live Run**
+        (flat task table + a trace tail built by appending only the *new*
+        lines of each poll's `build_trace_report` call, plus a status/
+        elapsed header; polls every 0.75s; `d` pops back to the dashboard
+        without touching the `RunWorker` thread at all — the run keeps
+        going; `q` exits the whole app). **Run Summary** (a static,
+        scrollable `build_inspect_report` for a terminal run, opened from
+        the dashboard instead of the live view). Status text is colored
+        via the active theme's own `$success`/`$warning`/`$error`
+        variables (`App.get_css_variables()`), not hand-rolled hex codes,
+        so it's correct in both themes.
+      - Tests: `tests/tui/test_runner.py` (the thread/own-connection bridge
+        directly, no Textual involved), `tests/tui/test_app.py` (seven
+        `App.run_test()`/Pilot tests covering the git-init modal both ways,
+        the empty-dashboard auto-advance, the deploy-confirm defaulting to
+        "No", a full custom-DAG run through to `COMPLETED_VERIFIED` and
+        back to the dashboard and a terminal-run summary, and the theme
+        toggle), plus three new `list_dag_templates` tests in
+        `tests/modes/test_custom_dag.py`. All against a real git repo and
+        real worktrees with a stubbed `run_sdk_node`, same boundary the
+        non-TUI suite already enforces — no real `claude` CLI/Vercel call.
+        Also launched for real (pty/tmux aren't available in this sandbox,
+        confirmed via `script`/`pty.fork()` both failing with permission
+        errors; Textual's own headless driver — the same one
+        `run_test()` uses, its officially supported no-pty path — is the
+        closest substitute) end to end against a throwaway repo:
+        dashboard → new session → custom-DAG form → deploy confirm → live
+        run → `COMPLETED_VERIFIED` → dashboard → run summary → theme
+        toggle, with an SVG screenshot saved at each step.
+
+      **Remaining:** a topological DAG-layout function and the DAG view
+      itself (zoom/zoom-in-with-pan, overview minimap — this phase is
+      list-view-only, explicitly out of scope here), a visual
       keyboard-driven DAG builder that writes the same
       `.forge/dags/*.json` files `custom_dag.py` already loads, and
       `forge/cli.py` moving from returning strings to structured data so
-      the TUI and plain-text commands share one data layer. Mid-run chat
-      into a live EXECUTION session is the biggest open risk in the whole
+      the TUI and plain-text commands share one data layer (the TUI
+      currently reuses `forge/cli.py`'s string-building functions —
+      `build_trace_report`/`build_inspect_report` — directly, plus two of
+      its underlying private helpers, `_latest_attempts_by_task`/
+      `_task_status`, rather than that refactor). Mid-run chat into a live
+      EXECUTION session is still the biggest open risk in the whole
       milestone, sized separately — see Known gaps.
 
 Everything after M9 (other execution-runtime adapters, modes beyond

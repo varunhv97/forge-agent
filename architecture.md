@@ -135,6 +135,43 @@ forge/
     docker_sandbox.py     launch_container/exec_in_container/stop_container
                           — the enforcement substitute for adapters with no
                           hook mechanism (Codex CLI today)
+  tui/            the interactive shell launched by bare `forge` (no
+                  subcommand — scripts/forge_cli.py makes the subparser
+                  optional and hands off to run_tui). UI layer only: reads
+                  a Store, never writes run state itself except the one
+                  start_new_run call below.
+    app.py          ForgeApp — resolves .forge/ via the same
+                    forge/project.py discovery forge run/resume/list use
+                    (NotAGitRepoError surfaces as a real ConfirmModal, not
+                    input()); owns one read-only Store every screen polls;
+                    theme defaults to "textual-light" (Textual 8.2.8
+                    defaults dark otherwise), `t` toggles it.
+                    start_new_run builds the request/graph through the
+                    same build_feature_blast_request_and_graph/
+                    build_custom_dag_request_and_graph +
+                    compile_and_validate + start_run path forge run
+                    already uses — the one write this layer does
+                    directly, on the main thread, before any
+                    RunWorker for that run exists. open_run starts (or
+                    reuses) a RunWorker for anything ACTIVE/
+                    BLOCKED_AWAITING_INPUT, otherwise shows a static
+                    inspect summary — also exactly what resuming an
+                    orphaned run looks like, since run_to_completion
+                    reconciles orphaned attempts itself
+    runner.py       RunWorker — one threading.Thread per live run, its
+                    own SQLite connection (db.connect, WAL mode), driving
+                    the real run_to_completion with the real registries/
+                    run_sdk_node. Never a sqlite3.Connection shared across
+                    threads; the only writer of run state once a run is
+                    live, same as forge run/resume already are
+    screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
+                    RunSummaryScreen/ConfirmModal — list-view only (no DAG
+                    view yet). Reuse forge/cli.py's build_trace_report/
+                    build_inspect_report (and two of its private helpers,
+                    _latest_attempts_by_task/_task_status) rather than
+                    re-deriving status data; status text is colored via
+                    the active theme's own $success/$warning/$error
+                    variables, never hand-rolled hex
 ```
 
 ## Resumability

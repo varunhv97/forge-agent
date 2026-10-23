@@ -1,0 +1,196 @@
+"""
+`ForgeApp`: the Textual app launched by running bare `forge`. Owns exactly
+one read-only `Store` (its own SQLite connection, opened once discovery
+resolves `.forge/forge.db` — see `forge/project.py`) that every screen
+polls from; it never writes run state itself. Starting or resuming a run
+hands off to `forge/tui/runner.py`'s `RunWorker`, which drives the real
+`run_to_completion` loop (`forge/controller/scheduler.py`) on its own
+background thread with its own separate connection — the one and only
+writer, exactly as `scripts/forge_cli.py`'s `forge run`/`resume` already
+drive it, just moved off the main thread so Textual's event loop is never
+blocked by it.
+
+The one write this module does perform directly, on the main thread, is
+`start_new_run`'s one-time `start_run` call (persist the new Request/
+GraphVersion/Run row) — the same single, non-concurrent write
+`scripts/forge_cli.py::_cmd_run` already does before handing off to
+`run_to_completion`. It happens over its own short-lived connection,
+before any `RunWorker` for that run exists, so there is never a moment
+where two things are writing to the database at once.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import ClassVar
+
+from textual.app import App
+from textual.binding import Binding, BindingType
+
+from forge import project
+from forge.controller import db
+from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
+from forge.controller.scheduler import start_run
+from forge.controller.store import NotFoundError, Store
+from forge.controller.validator import compile_and_validate
+from forge.models.permissions import Budgets
+from forge.models.run import RunStatus
+from forge.modes.custom_dag import (
+    DagTemplateInfo,
+    build_custom_dag_request_and_graph,
+    list_dag_templates,
+)
+from forge.modes.feature_blast import build_feature_blast_request_and_graph
+from forge.nodes import register_all
+from forge.tui.runner import RunWorker
+from forge.tui.screens import ConfirmModal, DashboardScreen, LiveRunScreen, RunSummaryScreen
+
+# Mirrors scripts/forge_cli.py's own DEFAULT_RUN_BUDGETS: the CLI's default
+# Budgets for a run started with no dedicated budget flag yet. Duplicated
+# here (not imported) since that script is the T20-exempt entry point, not
+# a library this layer should depend on.
+_DEFAULT_RUN_BUDGETS = Budgets(max_cost_usd=10.0, max_wall_seconds=1800)
+
+_LIVE_STATUSES = (RunStatus.ACTIVE, RunStatus.BLOCKED_AWAITING_INPUT)
+
+
+class ForgeApp(App[None]):
+    """The interactive Forge shell: dashboard, new-session, and live-run screens."""
+
+    TITLE = "Forge"
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("t", "toggle_theme", "Toggle light/dark")]
+
+    def __init__(self, *, db_path_override: Path | None = None) -> None:
+        super().__init__()
+        self._db_path_override = db_path_override
+        self.repo_root: Path = Path.cwd()
+        self.db_path: Path = Path("forge.db")
+        self._store: Store | None = None
+        self.node_registry = NodeTypeRegistry()
+        self.permission_registry = PermissionProfileRegistry()
+        register_all(self.node_registry, self.permission_registry)
+        self._live_workers: dict[str, RunWorker] = {}
+
+    @property
+    def store(self) -> Store:
+        """
+        The app's one read-only `Store`. Only ever valid once project
+        discovery (`_discover_and_start`) has resolved `.forge/forge.db` —
+        every screen that reads it is only ever pushed after that point.
+        """
+        if self._store is None:
+            raise RuntimeError("ForgeApp.store accessed before project discovery completed")
+        return self._store
+
+    def on_mount(self) -> None:
+        self.theme = "textual-light"  # Light by default; `t` toggles to dark.
+        self.run_worker(self._discover_and_start(), exclusive=True, name="discovery")
+
+    async def _discover_and_start(self) -> None:
+        try:
+            repo_root = project.find_repo_root()
+        except project.NotAGitRepoError as exc:
+            confirmed = await self.push_screen_wait(
+                ConfirmModal(
+                    f"Not a git repo: {exc.cwd}\n\n"
+                    "Forge needs a git repo to isolate work in worktrees. Work out "
+                    "of this folder and run `git init` here?",
+                    yes_label="Run git init",
+                    no_label="Cancel",
+                )
+            )
+            if not confirmed:
+                self.exit()
+                return
+            repo_root = project.init_repo(exc.cwd)
+
+        paths = project.ensure_forge_dir(repo_root)
+        self.repo_root = repo_root
+        self.db_path = self._db_path_override or paths.db_path
+        self._store = Store(db.connect(self.db_path))
+        self.push_screen(DashboardScreen())
+
+    def action_toggle_theme(self) -> None:
+        self.theme = "textual-dark" if self.theme == "textual-light" else "textual-light"
+
+    # -- data the screens need, without reaching past this layer -----------------
+
+    def list_modes(self) -> list[DagTemplateInfo]:
+        """Every `.forge/dags/*.json` template available alongside Feature Blast."""
+        return list_dag_templates(self.repo_root / ".forge" / "dags")
+
+    def start_new_run(
+        self, mode: str, template: DagTemplateInfo | None, values: dict[str, str]
+    ) -> str:
+        """
+        Builds the request/graph exactly the way `forge run` already does
+        (`build_feature_blast_request_and_graph` or
+        `build_custom_dag_request_and_graph`), validates it, and persists
+        it via `start_run` — the same one-time setup write
+        `scripts/forge_cli.py::_cmd_run` performs before handing off to
+        `run_to_completion`. Only ever called after the caller's own
+        deploy-authorization confirmation, so `deploy_authorized=True` is
+        always correct here: Feature Blast hardcodes it for the same
+        reason (requirements.md's key decision 6 — it's a one-time flag,
+        not a live per-deploy confirmation), and a custom DAG only reaches
+        this call once its own confirmation already succeeded.
+        """
+        if mode == "feature-blast":
+            request, draft = build_feature_blast_request_and_graph(
+                objective=values["objective"], journey_description=values["journey"]
+            )
+        else:
+            if template is None:
+                raise ValueError("custom DAG session started with no template selected")
+            request, draft = build_custom_dag_request_and_graph(
+                template.path,
+                values,
+                self.node_registry,
+                self.permission_registry,
+                _DEFAULT_RUN_BUDGETS,
+                deploy_authorized=True,
+            )
+        graph = compile_and_validate(draft, request, self.node_registry, self.permission_registry)
+
+        conn = db.connect(self.db_path)
+        write_store = Store(conn)
+        try:
+            run = start_run(request, graph, write_store)
+        finally:
+            write_store.close()
+        return run.id
+
+    def open_run(self, run_id: str, *, force_resume: bool) -> None:
+        """
+        Opens `run_id`: a live view if it's ACTIVE/BLOCKED_AWAITING_INPUT
+        (starting a fresh `RunWorker` first if none is already driving it
+        — this is also exactly what resuming an orphaned run looks like,
+        since `run_to_completion` reconciles orphaned attempts itself),
+        otherwise a static inspect-style summary.
+        """
+        try:
+            run = self.store.load_run(run_id)
+        except NotFoundError as exc:
+            self.notify(str(exc), severity="error")
+            return
+
+        if run.status not in _LIVE_STATUSES:
+            if force_resume:
+                self.notify(
+                    f"Run {run_id} already finished ({run.status.value}); nothing to resume."
+                )
+            self.push_screen(RunSummaryScreen(run_id))
+            return
+
+        worker = self._live_workers.get(run_id)
+        if worker is None or not worker.is_alive():
+            worker = RunWorker(run_id, self.db_path, self.repo_root)
+            self._live_workers[run_id] = worker
+            worker.start()
+        self.push_screen(LiveRunScreen(run_id))
+
+
+def run_tui(db_path_override: Path | None = None) -> int:
+    """Entry point `scripts/forge_cli.py` calls for bare `forge` (no subcommand)."""
+    ForgeApp(db_path_override=db_path_override).run()
+    return 0

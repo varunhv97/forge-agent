@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -145,6 +146,50 @@ def load_dag_definition(file_path: Path) -> DagDefinition:
             f"(expected {_SUPPORTED_SCHEMA_VERSION})"
         )
     return definition
+
+
+@dataclass(frozen=True)
+class DagTemplateInfo:
+    """
+    Enough to list a custom DAG template as a selectable option (e.g. in
+    the TUI's "new session" screen) without the caller needing to load and
+    hold onto the full `DagDefinition` itself.
+    """
+
+    path: Path
+    name: str
+    description: str
+    inputs: list[DagInputSpec]
+
+
+def list_dag_templates(dags_dir: Path) -> list[DagTemplateInfo]:
+    """
+    Lists every loadable `.forge/dags/*.json` template in `dags_dir`,
+    sorted by name. A file that fails to parse or validate (a bad
+    schema_version, invalid JSON, whatever `load_dag_definition` itself
+    would raise `CustomDagError` for) is skipped rather than propagating —
+    one broken template file shouldn't stop every other one from being
+    offered. Returns an empty list if `dags_dir` doesn't exist at all,
+    which is the ordinary case for a project with no custom DAGs yet.
+    """
+    if not dags_dir.is_dir():
+        return []
+    templates = []
+    for path in dags_dir.glob("*.json"):
+        try:
+            definition = load_dag_definition(path)
+        except CustomDagError:
+            continue
+        templates.append(
+            DagTemplateInfo(
+                path=path,
+                name=definition.name,
+                description=definition.description,
+                inputs=list(definition.inputs),
+            )
+        )
+    templates.sort(key=lambda t: t.name)
+    return templates
 
 
 def _resolve_permission_profile(

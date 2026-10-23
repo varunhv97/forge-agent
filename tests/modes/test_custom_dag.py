@@ -10,7 +10,11 @@ from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRe
 from forge.controller.validator import compile_and_validate
 from forge.models.common import Mode
 from forge.models.permissions import Budgets
-from forge.modes.custom_dag import CustomDagError, build_custom_dag_request_and_graph
+from forge.modes.custom_dag import (
+    CustomDagError,
+    build_custom_dag_request_and_graph,
+    list_dag_templates,
+)
 from forge.nodes import register_all
 
 
@@ -214,3 +218,40 @@ def test_unsupported_schema_version_raises_specific_error(tmp_path: Path) -> Non
         )
 
     assert "schema_version" in str(exc_info.value)
+
+
+# -- list_dag_templates (the TUI's "new session" screen uses this) -----------
+
+
+def test_list_dag_templates_empty_dir_returns_nothing(tmp_path: Path) -> None:
+    assert list_dag_templates(tmp_path / "dags") == []
+
+
+def test_list_dag_templates_lists_valid_templates_sorted_by_name(tmp_path: Path) -> None:
+    dags_dir = tmp_path / "dags"
+    dags_dir.mkdir()
+    zebra = _valid_definition()
+    zebra["name"] = "zebra-template"
+    zebra["description"] = "the zebra one"
+    apple = _valid_definition()
+    apple["name"] = "apple-template"
+    apple["description"] = "the apple one"
+    (dags_dir / "zebra.json").write_text(json.dumps(zebra))
+    (dags_dir / "apple.json").write_text(json.dumps(apple))
+
+    templates = list_dag_templates(dags_dir)
+
+    assert [t.name for t in templates] == ["apple-template", "zebra-template"]
+    assert templates[0].description == "the apple one"
+    assert templates[0].inputs[0].name == "objective"
+
+
+def test_list_dag_templates_skips_a_broken_file(tmp_path: Path) -> None:
+    dags_dir = tmp_path / "dags"
+    dags_dir.mkdir()
+    (dags_dir / "good.json").write_text(json.dumps(_valid_definition()))
+    (dags_dir / "broken.json").write_text("not json at all")
+
+    templates = list_dag_templates(dags_dir)
+
+    assert [t.name for t in templates] == ["implement-and-verify"]
