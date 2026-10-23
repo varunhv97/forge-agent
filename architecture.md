@@ -41,7 +41,11 @@ forge/
   controller/
     validator.py        compile_and_validate() — acyclicity + domain
                           invariants, same path for templates and revisions
-    node_registry.py     global NodeTypeRegistry, shared across modes
+    node_registry.py     global NodeTypeRegistry, shared across modes;
+                          also NodeTypeRegistry.all_types() — every
+                          registered node type, in registration order,
+                          added for the TUI DAG builder's node-type
+                          palette (nothing needed enumeration before)
     db.py                SQLite connection + schema + explicit transactions
     store.py             typed CRUD over the schema above
     mechanical.py        MechanicalRunnerRegistry — deterministic checks,
@@ -90,7 +94,12 @@ forge/
                   on failure), substitutes `{{ input }}` placeholders, and
                   hands back the same kind of draft for the caller to run
                   through compile_and_validate — never touches
-                  deploy_authorized/Budgets itself, both are caller-supplied
+                  deploy_authorized/Budgets itself, both are caller-supplied.
+                  resolve_permission_profile (not underscore-prefixed, on
+                  purpose) is reused directly by the TUI's DAG builder
+                  (forge/tui/dag_builder_screen.py) to validate a task's
+                  permission_profile override at template-save time — the
+                  same lookup/defaulting logic, not a second copy of it
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,
@@ -165,7 +174,11 @@ forge/
                     threads; the only writer of run state once a run is
                     live, same as forge run/resume already are
     screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
-                    RunSummaryScreen/ConfirmModal. Reuse forge/cli.py's
+                    RunSummaryScreen/ConfirmModal. DashboardScreen's `b`
+                    binding ("Build DAG") pushes dag_builder_screen.py's
+                    DagBuilderScreen — the only change this module made
+                    for the visual DAG builder; everything else about it
+                    lives in that new module. Reuse forge/cli.py's
                     build_trace_report/build_inspect_report (and two of
                     its private helpers, _latest_attempts_by_task/
                     _task_status) rather than re-deriving status data;
@@ -210,8 +223,9 @@ forge/
                     recomputed every poll tick. Detail-agnostic by design
                     — zoom lives entirely in dag_canvas.py.
     dag_canvas.py   render_dag_canvas(tasks, edges, layout, statuses,
-                    style_for_status, detail="full", durations=None) ->
-                    rich.text.Text — a 2D character grid (box-drawing/
+                    style_for_status, detail="full", durations=None,
+                    highlight_styles=None) -> rich.text.Text — a 2D
+                    character grid (box-drawing/
                     Unicode lines, not SVG/pixels). "Zoom" on a character
                     grid means level of detail, not pixel scaling:
                     detail="full" draws a 5-row box (border/id/`● status`/
@@ -232,6 +246,44 @@ forge/
                     Colors come from the caller's style_for_status (built
                     from screens._status_style/App.get_css_variables()) —
                     this module never picks its own colors.
+                    highlight_styles optionally maps task id -> a style
+                    string that *replaces* the status-derived one for
+                    that render — added for dag_builder_screen.py's
+                    "selected"/"connect source"/"connect target" cursor
+                    states, none of which are a run status; the caller
+                    still owns the actual color, same as style_for_status.
+    dag_builder_screen.py
+                    DagBuilderScreen — the visual, keyboard-driven DAG
+                    builder (M9 phase 5): place existing node types (from
+                    NodeTypeRegistry.all_types()) onto a canvas, connect
+                    them (`c`, navigate with `]`/`[`, `enter` to confirm —
+                    appends the source task's id to the target's
+                    depends_on), remove them (`x`, also stripping the
+                    removed id from every other task's depends_on), edit
+                    each one's description/acceptance_criterion_ids/
+                    permission_profile override in a per-task inspector
+                    (`i`), declare template metadata/inputs/acceptance
+                    criteria (`m`/`f`/`v`), and save (`s`) to
+                    `.forge/dags/<name>.json` in exactly the schema
+                    custom_dag.py's loader expects. Renders with the same
+                    dag_canvas.render_dag_canvas/dag_layout.
+                    compute_dag_layout the live-run view uses — no second
+                    renderer. Connect's cycle rejection reuses
+                    compute_dag_layout directly (the candidate edge is
+                    appended to a prospective edge list and handed to the
+                    same function; a DagLayoutError means "would create a
+                    cycle," surfaced via a visible, severity="error"
+                    notify, never a silent no-op) rather than a second
+                    cycle check. permission_profile overrides are
+                    validated at save time with custom_dag.py's own
+                    resolve_permission_profile. Creating a *new* template
+                    only — loading an existing one back in for further
+                    editing is out of scope for this pass. No
+                    set_interval/poll loop at all: unlike LiveRunScreen,
+                    there's no live run and nothing else mutates the
+                    authored graph concurrently, so the canvas is just
+                    re-rendered synchronously right after whatever
+                    keypress or modal changed it.
 ```
 
 ## Resumability

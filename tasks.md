@@ -94,7 +94,7 @@ Commit messages hold the full history; this file is a short index.
       DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
       live-run/resume — also done; phase 3 — the DAG view on the live-run
       screen — also done; phase 4 — zoom/pan/minimap on that DAG view —
-      also done; visual builder still not started).** Scope
+      also done; phase 5 — the visual DAG builder — also done).** Scope
       settled via mockups and discussion. The first pass
       was everything buildable and fully testable as plain Python/CLI;
       this second pass is the actual Textual shell on top of it.
@@ -361,16 +361,105 @@ Commit messages hold the full history; this file is a short index.
         completely; `0` then reset scroll to 0 and chose `"compact"` on
         its own, since `"full"`'s width didn't fit that terminal.
 
-      **Remaining:** a visual keyboard-driven DAG builder that writes the
-      same `.forge/dags/*.json` files `custom_dag.py` already loads, and
-      `forge/cli.py` moving from returning strings to structured data so
-      the TUI and plain-text commands share one data layer (the TUI
-      currently reuses `forge/cli.py`'s string-building functions —
-      `build_trace_report`/`build_inspect_report` — directly, plus two of
-      its underlying private helpers, `_latest_attempts_by_task`/
-      `_task_status`, rather than that refactor). Mid-run chat into a live
-      EXECUTION session is still the biggest open risk in the whole
-      milestone, sized separately — see Known gaps.
+      Done (phase 5 — the visual, keyboard-driven DAG builder):
+      - `forge/tui/dag_builder_screen.py` (new module — `screens.py` was
+        already 794 lines, and this needed its own set of modals):
+        `DagBuilderScreen`, opened by a new `b`/"Build DAG" binding on
+        `DashboardScreen` (the only change to an existing screen this
+        phase made — no other binding or flow moved). Creates a *new*
+        custom-DAG template only; loading an existing
+        `.forge/dags/*.json` back in for further editing is explicitly
+        out of scope for this pass, same as the task that specified it
+        said to leave for later.
+      - Reuses `forge/tui/dag_canvas.py`'s `render_dag_canvas` and
+        `forge/tui/dag_layout.py`'s `compute_dag_layout`/
+        `DagLayoutError` as-is for both rendering and cycle detection —
+        no second rendering engine, no second cycle check. The renderer
+        needed exactly one real addition: an optional
+        `highlight_styles: Mapping[str, str] | None` that replaces a
+        task's status-derived style for this render only, for the
+        builder's "selected" / "connect source" / "connect target"
+        cursor states (none of which are a run status). A task with no
+        real run status yet renders with a placeholder `"authoring"`
+        status string, which needed no further change at all — an
+        unrecognized status already renders neutrally, same as
+        `"not_started"` does today. Every task placed on the canvas is a
+        real `TaskSpec` (and every dependency a real `EdgeSpec`), derived
+        from the authored draft state the same way
+        `forge/modes/custom_dag.py`'s own loader derives them — node
+        type and kind are never free text, always the registry's.
+      - Node-type palette: an `OptionList` populated from a new
+        `NodeTypeRegistry.all_types()` (the one addition to that
+        registry — nothing needed enumeration before this). Selecting an
+        entry prompts for a unique task id and places it, selected.
+      - Connect mode (`c` on a selected task, navigate with `]`/`[` to a
+        second task, `enter` to confirm): appends the *source* task's id
+        to the *target* task's `depends_on`. Cycle rejection reuses
+        `dag_layout.compute_dag_layout` directly — the candidate edge is
+        appended to a prospective edge list and handed to the exact same
+        function the live-run view and `compile_and_validate` build on;
+        a `DagLayoutError` means "would create a cycle," surfaced via a
+        visible `app.notify(..., severity="error")`, never a silent
+        no-op, and nothing is applied. `x` removes a task and strips its
+        id from every other task's `depends_on` in the same step.
+      - Template metadata (`m`: NAME/DESCRIPTION), inputs (`f`), and
+        acceptance criteria (`v`, with `verification_method` chosen from
+        an `OptionList` built from `typing.get_args` on
+        `AcceptanceCriterion.model_fields["verification_method"]`
+        itself, so it can never offer a value that model doesn't accept)
+        are each a small, reused `_TextFieldModal` (validate-before-
+        dismiss, so a bad entry re-prompts instead of handing the caller
+        something to re-validate). The per-task inspector (`i`) shows
+        `id`/node type/`depends_on` read-only and lets `description`/
+        `acceptance_criterion_ids`/a `permission_profile` override be
+        edited — `acceptance_criterion_ids` is checked against the
+        criteria already declared above before the modal ever dismisses.
+      - Save (`s`) builds a real `DagDefinition` (the exact pydantic
+        model `forge/modes/custom_dag.py`'s loader parses) and writes
+        `.forge/dags/<name>.json`. `permission_profile` overrides are
+        validated with that module's own `resolve_permission_profile`
+        (un-underscored from `_resolve_permission_profile` specifically
+        so this screen could reuse it instead of re-implementing the
+        same lookup/defaulting logic) — not a second check. After
+        writing, the file is immediately re-parsed with
+        `load_dag_definition` as a sanity check.
+      - Tests (`tests/tui/test_dag_builder_screen.py`, real
+        `App.run_test()`/Pilot): `b` reaching the builder from a fresh
+        (auto-advances to New Session first, same as the empty-dashboard
+        behavior phase 2 already tests) dashboard; a cycle attempt
+        rejected with `a`'s `depends_on` left untouched and an "error"-
+        severity notification containing "cycle"; and the actual
+        acceptance criterion for this phase —
+        `test_building_and_saving_a_branching_template_round_trips`
+        places two tasks, connects them, declares an input and an
+        acceptance criterion, attaches the criterion to the dependent
+        task, saves, then feeds the saved file straight into
+        `build_custom_dag_request_and_graph` + `compile_and_validate`
+        and asserts a real, active `GraphVersion` comes back — not just
+        that the file was written. Also visually confirmed outside the
+        suite (Textual's headless-driver SVG screenshot, no real pty in
+        this sandbox, same approach every prior TUI phase used): two
+        connected boxes render correctly, and the connect-mode source
+        task's text switches to the theme's own `warning` color (this
+        theme's `accent` and `warning` happen to share one hex value,
+        which is a property of the theme's palette, not of this code —
+        both are still looked up by their own distinct semantic name).
+      - This screen has no `set_interval`/poll loop at all, deliberately
+        unlike `LiveRunScreen` — there is no live run and nothing else
+        mutates the authored graph concurrently, so the canvas is just
+        re-rendered synchronously right after whatever keypress or modal
+        changed it. Run twice with no failures to check for the kind of
+        timing issue two earlier phases hit.
+
+      **Remaining:** `forge/cli.py` moving from returning strings to
+      structured data so the TUI and plain-text commands share one data
+      layer (the TUI currently reuses `forge/cli.py`'s string-building
+      functions — `build_trace_report`/`build_inspect_report` — directly,
+      plus two of its underlying private helpers,
+      `_latest_attempts_by_task`/`_task_status`, rather than that
+      refactor). Mid-run chat into a live EXECUTION session is still the
+      biggest open risk in the whole milestone, sized separately — see
+      Known gaps.
 
 Everything after M9 (other execution-runtime adapters, modes beyond
 custom-DAG templates) is backlog. See `requirements.md`.

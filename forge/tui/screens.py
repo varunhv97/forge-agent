@@ -50,6 +50,7 @@ from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
 from forge.models.attempt import Attempt
 from forge.modes.custom_dag import CustomDagError, DagTemplateInfo
+from forge.tui.dag_builder_screen import DagBuilderScreen
 from forge.tui.dag_canvas import DagDetail, canvas_size, render_dag_canvas, visible_rank_range
 from forge.tui.dag_layout import DagLayout, compute_dag_layout
 
@@ -208,6 +209,7 @@ class DashboardScreen(Screen[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("n", "new_session", "New session"),
         Binding("r", "resume_selected", "Resume"),
+        Binding("b", "build_dag", "Build DAG"),
         Binding("q", "quit_app", "Quit"),
     ]
 
@@ -284,6 +286,9 @@ class DashboardScreen(Screen[None]):
         run_id = self._selected_run_id()
         if run_id is not None:
             _get_app(self).open_run(run_id, force_resume=True)
+
+    def action_build_dag(self) -> None:
+        self.app.push_screen(DagBuilderScreen())
 
     def action_quit_app(self) -> None:
         self.app.exit()

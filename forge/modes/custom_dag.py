@@ -81,7 +81,7 @@ class DagTaskSpec(BaseModel):
     depends_on: list[str] = []
     acceptance_criterion_ids: list[str] = []
     # Optional: when omitted, defaults to the node_type's own
-    # NodeType.permission_profile — see _resolve_permission_profile. The
+    # NodeType.permission_profile — see resolve_permission_profile. The
     # file never has to repeat a node type's default profile just to name
     # a task.
     permission_profile: str | None = None
@@ -192,7 +192,7 @@ def list_dag_templates(dags_dir: Path) -> list[DagTemplateInfo]:
     return templates
 
 
-def _resolve_permission_profile(
+def resolve_permission_profile(
     task: DagTaskSpec,
     node_type_name: str,
     node_registry: NodeTypeRegistry,
@@ -200,6 +200,12 @@ def _resolve_permission_profile(
     *,
     file_path: Path,
 ) -> str:
+    """
+    Not underscore-prefixed: the TUI's DAG builder
+    (`forge/tui/dag_builder_screen.py`) reuses this exact function to
+    validate a task's permission_profile override at save time, rather
+    than re-implementing the same lookup/defaulting logic differently.
+    """
     profile_name = task.permission_profile or node_registry.get(node_type_name).permission_profile
     try:
         permission_registry.get(profile_name)
@@ -251,7 +257,7 @@ def build_custom_dag_request_and_graph(
                 f"'{dag_task.node_type}'"
             ) from exc
 
-        permission_profile = _resolve_permission_profile(
+        permission_profile = resolve_permission_profile(
             dag_task,
             dag_task.node_type,
             node_registry,

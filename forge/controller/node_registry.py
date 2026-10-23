@@ -68,6 +68,16 @@ class NodeTypeRegistry:
     def __contains__(self, name: str) -> bool:
         return name in self._by_name
 
+    def all_types(self) -> list[NodeType]:
+        """
+        Every registered node type, in registration order. Nothing needed
+        full enumeration before the TUI's visual DAG builder
+        (`forge/tui/dag_builder_screen.py`), whose node-type palette lists
+        every type `register_all()` populated here rather than hardcoding
+        a list of its own.
+        """
+        return list(self._by_name.values())
+
 
 class UnknownPermissionProfileError(KeyError):
     pass

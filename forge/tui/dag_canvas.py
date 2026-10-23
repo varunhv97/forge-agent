@@ -233,17 +233,33 @@ def render_dag_canvas(
     *,
     detail: DagDetail = "full",
     durations: Mapping[str, str] | None = None,
+    highlight_styles: Mapping[str, str] | None = None,
 ) -> Text:
     """
     `statuses` maps task id -> status string, same source `LiveRunScreen`
     already derives via `forge.cli._task_status`. `style_for_status` is
     `screens._status_style` partially applied over the active theme's
-    `get_css_variables()` — this module never picks colors itself.
+    `get_css_variables()` — this module never picks colors itself. A
+    caller with no real run status yet (the DAG builder, authoring a
+    template before any run exists) can pass a placeholder status the
+    caller's own `style_for_status` doesn't recognize (e.g. "authoring")
+    — this module already renders any unrecognized status neutrally,
+    same as a real "not_started" task today, so no separate rendering
+    path is needed for that case.
 
     `detail` picks the box's level of detail (see module docstring).
     `durations` optionally maps task id -> a short human string (e.g.
     "0:02:14") shown on a `"full"`-detail box's third content line; a task
     with no entry (or when `durations` is omitted entirely) shows "-".
+
+    `highlight_styles` optionally maps task id -> a Rich style string that
+    *replaces* (rather than blends with) that task's status-derived style
+    for this render — the DAG builder's own "selected" / "connect source" /
+    "connect target" cursor states, which aren't a run status at all. The
+    caller still owns the actual color (built the same way
+    `style_for_status` is, from the active theme's variables) — this
+    module just applies whichever style string it's handed, same as it
+    already does for `style_for_status`'s result.
     """
     cfg = _DETAIL_CONFIGS[detail]
     width, height = canvas_size(layout, detail)
@@ -251,6 +267,7 @@ def render_dag_canvas(
         return Text("(no tasks)")
     grid = _Grid(width=width, height=height)
     durations = durations or {}
+    highlight_styles = highlight_styles or {}
     inner_width = cfg.box_width - 2
 
     tasks_by_id = {t.id: t for t in tasks}
@@ -259,7 +276,7 @@ def render_dag_canvas(
         if position is None:
             continue
         status = statuses.get(task.id, "not_started")
-        style = style_for_status(status)
+        style = highlight_styles.get(task.id) or style_for_status(status)
         content_rows = (
             _compact_content_rows(task, inner_width)
             if detail == "compact"
