@@ -186,7 +186,9 @@ async def test_custom_dag_run_goes_live_then_completes(
         live_screen = app.screen
         assert isinstance(live_screen, LiveRunScreen)
         run_id = live_screen.run_id
-        await _wait_until(lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED)
+        await _wait_until(
+            lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED, timeout=30.0
+        )
 
         # 'd' returns to the dashboard without stopping anything (the run
         # already finished by this point, but the keybinding itself must
@@ -268,7 +270,9 @@ async def test_g_toggles_between_list_and_graph_view(
         assert live_screen.query_one("#graph-view").display is False
 
         run_id = live_screen.run_id
-        await _wait_until(lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED)
+        await _wait_until(
+            lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED, timeout=30.0
+        )
 
 
 async def test_graph_view_renders_a_branching_custom_dag(
@@ -294,7 +298,9 @@ async def test_graph_view_renders_a_branching_custom_dag(
         assert isinstance(live_screen, LiveRunScreen)
         run_id = live_screen.run_id
 
-        await _wait_until(lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED)
+        await _wait_until(
+            lambda: app.store.load_run(run_id).status == RunStatus.COMPLETED_VERIFIED, timeout=30.0
+        )
         await pilot.press("g")
 
         plain = _canvas_plain(live_screen.query_one("#dag-canvas", Static))

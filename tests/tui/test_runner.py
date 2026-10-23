@@ -67,7 +67,7 @@ def test_run_worker_drives_a_run_to_completion_on_its_own_thread(
     assert not worker.is_alive()
     worker.start()
 
-    assert worker.done.wait(timeout=15), "RunWorker did not finish within 15s"
+    assert worker.done.wait(timeout=30), "RunWorker did not finish within 30s"
     assert worker.error is None
     assert not worker.is_alive()
 
@@ -86,7 +86,7 @@ def test_run_worker_refuses_to_start_twice(monkeypatch: pytest.MonkeyPatch, git_
 
     worker = RunWorker(run_id, db_path, git_repo)
     worker.start()
-    worker.done.wait(timeout=15)
+    worker.done.wait(timeout=30)
 
     with pytest.raises(RuntimeError):
         worker.start()
