@@ -173,9 +173,30 @@ forge/
                     $success/$warning/$error variables, never hand-rolled
                     hex. LiveRunScreen renders two views of the same poll
                     tick's data, toggled with `g`: the original flat task
-                    table + trace tail, and a DAG canvas (#graph-view, in
-                    a VerticalScroll so Textual's own scrolling covers a
-                    graph wider than the terminal — no zoom/pan here).
+                    table + trace tail, and a DAG canvas (#graph-view).
+                    #graph-view overrides VerticalScroll's own default
+                    `overflow-x: hidden` to `auto` (confirmed from
+                    Textual's source — a bare VerticalScroll does not
+                    scroll horizontally on its own), and LiveRunScreen
+                    binds arrow keys as priority Bindings
+                    (action_pan_left/right/up/down, scroll_relative with
+                    force=True) so pan is actually reachable from the
+                    keyboard, not just a scrollbar. `+`/`-` toggle
+                    render_dag_canvas's detail level ("full"/"compact");
+                    `0` snaps scroll back to the origin and picks
+                    whichever detail's canvas_size fits the current
+                    container_size.width. All four pan actions plus the
+                    three zoom actions are gated by a check_action
+                    override so they're only active (and only shown in
+                    the footer) while the graph view is visible — outside
+                    it, check_action returns False and the key falls
+                    through to whatever's actually focused (e.g. the task
+                    table's own row-cursor binding). #graph-minimap (a
+                    one-line Static under the graph view) renders a
+                    proportional bar plus a "ranks X-Y/Z" readout from
+                    #graph-view's own real scroll_x/scroll_y/
+                    container_size every tick — never a static
+                    placeholder.
     dag_layout.py   compute_dag_layout(tasks, edges) -> DagLayout — pure,
                     zero Textual imports. rank = longest path from a root
                     (no incoming "dependency" edge), which spreads a
@@ -186,19 +207,31 @@ forge/
                     position within its rank (tasks' own list order, no
                     crossing-minimization). Computed once per
                     GraphVersion.id and cached by LiveRunScreen, not
-                    recomputed every poll tick.
+                    recomputed every poll tick. Detail-agnostic by design
+                    — zoom lives entirely in dag_canvas.py.
     dag_canvas.py   render_dag_canvas(tasks, edges, layout, statuses,
-                    style_for_status) -> rich.text.Text — a 2D character
-                    grid (box-drawing/Unicode lines, not SVG/pixels): a
-                    3-row box per task, edges routed through the gap
-                    columns between ranks (a stub, a vertical run, a stub
-                    for a lane change). Every grid write only lands on a
-                    still-blank cell, so a multi-rank edge flying over an
-                    intervening rank's box stops drawing across that
-                    box's footprint instead of corrupting it. Colors come
-                    from the caller's style_for_status (built from
-                    screens._status_style/App.get_css_variables()) — this
-                    module never picks its own colors.
+                    style_for_status, detail="full", durations=None) ->
+                    rich.text.Text — a 2D character grid (box-drawing/
+                    Unicode lines, not SVG/pixels). "Zoom" on a character
+                    grid means level of detail, not pixel scaling:
+                    detail="full" draws a 5-row box (border/id/`● status`/
+                    duration/border); detail="compact" draws a 3-row box
+                    (border/`● id`/border) at roughly half the width — a
+                    _DetailConfig per level holds box/gap sizing, and only
+                    this module's own constants/content change between
+                    them (dag_layout.py's rank/lane math never does).
+                    Edges route through the gap columns between ranks (a
+                    stub, a vertical run, a stub for a lane change), each
+                    grid write landing only on a still-blank cell so a
+                    multi-rank edge flying over an intervening rank's box
+                    stops drawing across its footprint instead of
+                    corrupting it. canvas_size(layout, detail) and
+                    visible_rank_range(layout, detail, scroll_x,
+                    viewport_width) are the pure geometry helpers
+                    LiveRunScreen's zoom-reset and minimap depend on.
+                    Colors come from the caller's style_for_status (built
+                    from screens._status_style/App.get_css_variables()) —
+                    this module never picks its own colors.
 ```
 
 ## Resumability

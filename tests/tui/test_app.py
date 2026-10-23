@@ -16,7 +16,8 @@ from typing import cast
 
 import pytest
 from rich.text import Text
-from textual.widgets import Static
+from textual.pilot import Pilot
+from textual.widgets import DataTable, Static
 
 from forge import project
 from forge.controller import db
@@ -308,3 +309,169 @@ async def test_graph_view_renders_a_branching_custom_dag(
             assert task_id in plain
         # The fan-out needs at least one vertical run to join a lane change.
         assert "│" in plain
+
+
+# -- live run: DAG view zoom/pan/minimap ---------------------------------------
+
+
+def _setup_branching_dag(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    """Chdir into `git_repo` and write the fan-out custom DAG fixture —
+    must run *before* `ForgeApp().run_test()` is entered, since project
+    discovery (which resolves `.forge/` from the current working
+    directory) happens as soon as the app mounts."""
+    monkeypatch.chdir(git_repo)
+    project.ensure_forge_dir(git_repo)
+    write_branching_dag(git_repo)
+    monkeypatch.setattr(runner_module, "run_sdk_node", fake_execution_runner)
+
+
+async def _open_branching_run_in_graph_view(app: ForgeApp, pilot: Pilot[None]) -> LiveRunScreen:
+    """Drives the already-mounted app (fan-out custom DAG already written
+    to `.forge/dags/`, see `_setup_branching_dag`) from the new-session
+    screen through to the live-run screen with the graph view showing.
+    Three ranks is wide enough that even "full" detail overflows a narrow
+    (60-column) terminal — exactly the scenario zoom/pan exist for."""
+    await _wait_until(lambda: isinstance(app.screen, NewSessionScreen))
+    await pilot.press("down", "enter")
+    await _wait_until(lambda: app.screen.query_one("#field-objective") is not None)
+    await pilot.click("#field-objective")
+    await pilot.press(*"build a tiny thing")
+    await pilot.click("#continue-button")
+    await _wait_until(lambda: isinstance(app.screen, ConfirmModal))
+    await pilot.press("y")
+    await _wait_until(lambda: isinstance(app.screen, LiveRunScreen))
+    live_screen = app.screen
+    assert isinstance(live_screen, LiveRunScreen)
+
+    await pilot.press("g")
+    await pilot.pause()
+    assert live_screen.query_one("#graph-view").display is True
+    # The minimap's first real render is deferred to just after the next
+    # layout refresh (see `LiveRunScreen.action_toggle_graph_view`) — wait
+    # for it rather than assuming one `pilot.pause()` already covered it.
+    await _wait_until(lambda: live_screen.query_one("#graph-minimap", Static).content != "")
+    return live_screen
+
+
+async def test_zoom_and_pan_bindings_only_active_while_graph_view_shown(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    _setup_branching_dag(monkeypatch, git_repo)
+
+    app = ForgeApp()
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _wait_until(lambda: isinstance(app.screen, NewSessionScreen))
+        await pilot.press("down", "enter")
+        await _wait_until(lambda: app.screen.query_one("#field-objective") is not None)
+        await pilot.click("#field-objective")
+        await pilot.press(*"build a tiny thing")
+        await pilot.click("#continue-button")
+        await _wait_until(lambda: isinstance(app.screen, ConfirmModal))
+        await pilot.press("y")
+        await _wait_until(lambda: isinstance(app.screen, LiveRunScreen))
+        live_screen = app.screen
+        assert isinstance(live_screen, LiveRunScreen)
+
+        # List view showing: the graph-only zoom/pan actions are disabled
+        # (hidden from the footer), and a plain "up"/"down" press still
+        # moves the task table's own row cursor rather than being
+        # swallowed by a graph-only pan binding.
+        assert live_screen.check_action("zoom_full", ()) is False
+        assert live_screen.check_action("pan_left", ()) is False
+        table = live_screen.query_one("#tasks-table", DataTable)
+        table.focus()
+        await pilot.pause()
+        start_row = table.cursor_row
+        await pilot.press("down")
+        await pilot.pause()
+        assert table.cursor_row != start_row
+
+        # Graph view showing: they're active.
+        await pilot.press("g")
+        assert live_screen.check_action("zoom_full", ()) is True
+        assert live_screen.check_action("pan_left", ()) is True
+
+
+def _current_detail(screen: LiveRunScreen) -> str:
+    # A plain `str` return erases the `Literal["full", "compact"]` type so
+    # mypy doesn't (incorrectly) treat an equality assert on this attribute
+    # as narrowing it for the rest of the test, across awaits that can
+    # actually change it.
+    return screen._detail
+
+
+async def test_minus_switches_to_compact_detail_and_plus_back_to_full(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    _setup_branching_dag(monkeypatch, git_repo)
+
+    app = ForgeApp()
+    async with app.run_test(size=(60, 20)) as pilot:
+        live_screen = await _open_branching_run_in_graph_view(app, pilot)
+        canvas = live_screen.query_one("#dag-canvas", Static)
+
+        full_plain = _canvas_plain(canvas)
+        full_width = max(len(line) for line in full_plain.split("\n"))
+        assert _current_detail(live_screen) == "full"
+
+        await pilot.press("-")
+        compact_plain = _canvas_plain(canvas)
+        compact_width = max(len(line) for line in compact_plain.split("\n"))
+        assert _current_detail(live_screen) == "compact"
+        # Compact detail is deliberately narrower per rank — that's what
+        # lets a wide graph fit in less horizontal space.
+        assert compact_width < full_width
+
+        await pilot.press("+")
+        assert _current_detail(live_screen) == "full"
+        restored_plain = _canvas_plain(canvas)
+        assert max(len(line) for line in restored_plain.split("\n")) == full_width
+
+
+async def test_arrow_keys_pan_the_graph_view_and_zero_resets(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    _setup_branching_dag(monkeypatch, git_repo)
+
+    app = ForgeApp()
+    async with app.run_test(size=(60, 20)) as pilot:
+        live_screen = await _open_branching_run_in_graph_view(app, pilot)
+        container = live_screen.query_one("#graph-view")
+
+        assert container.scroll_x == 0
+        await pilot.press("right")
+        await pilot.press("right")
+        after_right = container.scroll_x
+        assert after_right > 0
+
+        await pilot.press("left")
+        assert container.scroll_x < after_right
+
+        # "0" snaps back to the origin and picks whichever detail fits the
+        # (narrow, 60-column) terminal best.
+        await pilot.press("+")  # force "full" first, so reset has real work to do
+        await pilot.press("right")
+        await pilot.press("0")
+        assert container.scroll_x == 0
+        assert container.scroll_y == 0
+
+
+async def test_minimap_reflects_the_real_scroll_position(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    _setup_branching_dag(monkeypatch, git_repo)
+
+    app = ForgeApp()
+    async with app.run_test(size=(60, 20)) as pilot:
+        live_screen = await _open_branching_run_in_graph_view(app, pilot)
+        minimap = live_screen.query_one("#graph-minimap", Static)
+
+        before = cast(str, minimap.content)
+        assert before  # driven by a real scroll position, not blank/absent
+        assert "ranks" in before
+
+        await pilot.press("right")
+        await pilot.press("right")
+        await pilot.press("right")
+        after = cast(str, minimap.content)
+        assert after != before

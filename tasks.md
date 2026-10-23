@@ -93,7 +93,8 @@ Commit messages hold the full history; this file is a short index.
 - [ ] **M9: Interactive TUI shell, per-project state, user-authored custom
       DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
       live-run/resume — also done; phase 3 — the DAG view on the live-run
-      screen — also done; visual builder still not started).** Scope
+      screen — also done; phase 4 — zoom/pan/minimap on that DAG view —
+      also done; visual builder still not started).** Scope
       settled via mockups and discussion. The first pass
       was everything buildable and fully testable as plain Python/CLI;
       this second pass is the actual Textual shell on top of it.
@@ -276,19 +277,100 @@ Commit messages hold the full history; this file is a short index.
         rendered SVG shows all four boxes, the fan-out connector, and the
         new `g Graph view` footer hint.
 
-      **Remaining:** zoom and zoom-in-with-pan with an overview minimap
-      for a graph wider than the terminal (this phase is deliberately
-      clip-or-scroll-only), a visual keyboard-driven DAG builder that
-      writes the same `.forge/dags/*.json` files `custom_dag.py` already
-      loads, and `forge/cli.py` moving from returning strings to
-      structured data so the TUI and plain-text commands share one data
-      layer (the TUI currently reuses `forge/cli.py`'s string-building
-      functions — `build_trace_report`/`build_inspect_report` — directly,
-      plus two of its underlying private helpers,
-      `_latest_attempts_by_task`/`_task_status`, rather than that
-      refactor). Mid-run chat into a live EXECUTION session is still the
-      biggest open risk in the whole milestone, sized separately — see
-      Known gaps.
+      Done (phase 4 — zoom, pan, and a minimap/overview on the DAG view):
+      - `forge/tui/dag_canvas.py`'s `render_dag_canvas` gained a `detail:
+        Literal["full", "compact"]` keyword (default `"full"`, matching
+        phase 3's existing look exactly, so nothing else changed
+        visually). "Zoom" on a character grid means level of detail, not
+        pixel scaling: `"full"` is a 5-row box (border, id, `● status`,
+        duration, border); `"compact"` is a 3-row box (border, `●
+        id`, border) at roughly half the width — smaller per-node
+        footprint, which is what actually lets more ranks fit across a
+        terminal width. `durations` is a new optional `task_id -> str`
+        map (`LiveRunScreen` derives it from each task's latest attempt's
+        `started_at`/`finished_at`, "-" if it has neither) shown on
+        `"full"`-detail boxes only. `dag_layout.py` itself is untouched —
+        rank/lane stay purely topological; only `dag_canvas.py`'s own
+        sizing constants (`_DetailConfig`, one per detail level) and
+        per-box content differ. A new `canvas_size(layout, detail)` and
+        `visible_rank_range(layout, detail, scroll_x, viewport_width)`
+        are the pure geometry helpers the live-run screen's zoom-reset
+        and minimap now depend on.
+      - Pan is real: `#graph-view`'s own `VerticalScroll` had
+        `overflow-x: hidden` by default (confirmed from Textual's own
+        source, not assumed — `VerticalScroll`'s `DEFAULT_CSS`), which
+        silently blocked horizontal scrolling even though the canvas was
+        already wider than the viewport; `LiveRunScreen`'s own CSS now
+        overrides it to `overflow-x: auto`. Arrow keys are wired as
+        `priority=True` `Binding`s on `LiveRunScreen` itself (`action_
+        pan_left/right/up/down`, `container.scroll_relative(..., animate=
+        False, immediate=True, force=True)`), gated off by a `check_
+        action` override so they're only live — and only shown in the
+        footer — while the graph view is actually showing; when it isn't,
+        `check_action` returns `False`, `run_action` reports unhandled,
+        and the key falls through to whatever's actually focused (e.g.
+        the task table's own row-cursor binding), confirmed by a real
+        Pilot test that an "down" press still moves `DataTable.
+        cursor_row` in list view. Priority bindings were necessary
+        because a non-priority `Screen` binding loses to the focused
+        widget's own same-key binding; checked from Textual's own
+        `App._check_bindings`/`Binding.priority`, not assumed.
+      - Zoom keybindings on `LiveRunScreen`, active only while the graph
+        view is visible (same `check_action` gate as pan): `+`
+        (`action_zoom_full`) and `-` (`action_zoom_compact`) switch
+        `self._detail` and re-render immediately, without touching scroll
+        position; `0` (`action_zoom_reset`) snaps `#graph-view`'s scroll
+        back to `(0, 0)` *and* picks whichever detail level's
+        `canvas_size` fits the container's current `container_size.width`
+        — `"full"` if it fits, `"compact"` otherwise; if neither fits
+        (a very wide graph), `"compact"` is still the better of the two,
+        an acceptable terminal limitation rather than a bug to chase
+        further. Footer hints match the existing `g`/`"Graph view"` style
+        (`+`/`"More detail"`, `-`/`"Less detail (fit wider)"`,
+        `0`/`"Reset zoom/pan"`).
+      - `#graph-minimap`, a one-line `Static` below the graph view
+        (shown/hidden together with it): `_update_minimap` reads
+        `#graph-view`'s *actual* `scroll_x`/`scroll_y`/`container_size`
+        every tick (plus right after a pan/zoom/toggle, deferred via
+        `call_after_refresh` on the toggle since the container's size
+        isn't updated yet in the same call stack as the `display` flip
+        that revealed it) and renders a proportional `[▓▓▓··]`-style bar
+        (`_minimap_bar`, a pure function) plus a `ranks X-Y/Z` readout
+        from `visible_rank_range` — a terminal-appropriate stand-in for
+        the mockup's pixel minimap, answering "where am I" from real
+        numbers, never a static placeholder.
+      - Tests: `tests/tui/test_dag_canvas.py` gained compact-vs-full
+        detail assertions (narrower, drops the status word), a duration
+        test, and `visible_rank_range` coverage (viewport math, clamping
+        past the last rank, the empty-graph degenerate case).
+        `tests/tui/test_app.py` adds four real `Pilot` tests on the
+        fan-out custom DAG fixture, run with a deliberately narrow
+        60-column terminal size so the graph genuinely needs to
+        scroll/zoom to fit: zoom/pan actions disabled outside the graph
+        view (and list-view arrow-key table navigation unaffected),
+        `-`/`+` actually changing the rendered canvas's width,
+        arrow-key panning changing `#graph-view.scroll_x` and `0`
+        resetting it, and the minimap's text actually changing after a
+        pan. Also visually confirmed outside the test suite the same way
+        phase 2/3 did (Textual's headless-driver SVG screenshot, no real
+        pty in this sandbox): on an 80-column terminal, the three-rank
+        fan-out DAG's "full" detail needed 8 columns of horizontal
+        scroll (`max_scroll_x == 8`) and the minimap bar visibly shifted
+        after panning right; switching to "compact" detail dropped
+        `max_scroll_x` to 0 (the whole graph fit) and the bar filled
+        completely; `0` then reset scroll to 0 and chose `"compact"` on
+        its own, since `"full"`'s width didn't fit that terminal.
+
+      **Remaining:** a visual keyboard-driven DAG builder that writes the
+      same `.forge/dags/*.json` files `custom_dag.py` already loads, and
+      `forge/cli.py` moving from returning strings to structured data so
+      the TUI and plain-text commands share one data layer (the TUI
+      currently reuses `forge/cli.py`'s string-building functions —
+      `build_trace_report`/`build_inspect_report` — directly, plus two of
+      its underlying private helpers, `_latest_attempts_by_task`/
+      `_task_status`, rather than that refactor). Mid-run chat into a live
+      EXECUTION session is still the biggest open risk in the whole
+      milestone, sized separately — see Known gaps.
 
 Everything after M9 (other execution-runtime adapters, modes beyond
 custom-DAG templates) is backlog. See `requirements.md`.
