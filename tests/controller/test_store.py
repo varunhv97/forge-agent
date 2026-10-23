@@ -66,6 +66,37 @@ def test_run_roundtrip_and_update(store: Store):
     assert store.load_run(run.id).status == RunStatus.COMPLETED_VERIFIED
 
 
+def test_list_runs_orders_newest_updated_first(store: Store):
+    older = Run(
+        id="run-older",
+        request_id="req-1",
+        active_graph_version_id="gv-1",
+        status=RunStatus.ACTIVE,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    newer = Run(
+        id="run-newer",
+        request_id="req-1",
+        active_graph_version_id="gv-1",
+        status=RunStatus.COMPLETED_VERIFIED,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+    # saved in the "wrong" order, so a correct result can't be an accident
+    # of insertion order
+    store.save_run(older)
+    store.save_run(newer)
+
+    runs = store.list_runs()
+
+    assert [r.id for r in runs] == ["run-newer", "run-older"]
+
+
+def test_list_runs_empty_store_returns_empty_list(store: Store):
+    assert store.list_runs() == []
+
+
 def test_update_missing_run_raises(store: Store):
     run = Run(
         id="ghost",

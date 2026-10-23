@@ -20,6 +20,26 @@ by controller code; LLMs only produce proposals the controller validates.
 - 16 other modes are a named backlog only — no template/graph detail until
   we pick one up and discuss it first.
 
+## v2 scope (M9, discussed and settled, not yet built)
+
+- An interactive TUI as the default `forge` experience (light theme by
+  default, dark optional), replacing one-shot CLI commands as the primary
+  way to use Forge — `forge trace`/`forge inspect` stay as the plain-text
+  layer underneath. Per-project state in `.forge/forge.db` +
+  `.forge/worktrees`, discovered from the current working directory.
+- A DAG view of a live run (not just a flat task list), including zoom
+  (less detail, whole graph) and zoom-in-with-pan (full detail, cropped,
+  with an overview minimap) for graphs too wide to show at once.
+- User-authored custom DAGs: arrangements of *existing* node types into
+  new graph shapes, saved as `.forge/dags/*.json` and run through the
+  exact same `compile_and_validate` gate as Feature Blast — not new node
+  behavior, not a new mode in the `Mode` enum sense. Authorable by hand or
+  via a visual, keyboard-driven DAG builder that writes the same file.
+- Mid-run chat: a free-form message into a *live* EXECUTION session,
+  treated the same as the model's own reasoning (no controller bypass) —
+  sized separately since it depends on what the Claude Agent SDK actually
+  exposes for multi-turn sessions (see `tasks.md` M9 and Known gaps).
+
 ## Key decisions
 
 1. Execution nodes run via Claude Agent SDK or Codex CLI; decision nodes
@@ -40,5 +60,7 @@ by controller code; LLMs only produce proposals the controller validates.
 
 ## Explicitly deferred (not missing — intentionally not built yet)
 
-Parent/child subgraph composition, every mode but Feature Blast, a third+
-runtime adapter, learned routing, a dashboard UI.
+Parent/child subgraph composition, every built-in mode but Feature Blast,
+a third+ runtime adapter, learned routing, a hosted/web dashboard (the M9
+TUI is a local terminal app, not this — Forge stays a personal tool run
+by one person on their own machine, never a multi-user hosted service).

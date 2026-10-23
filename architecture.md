@@ -21,6 +21,20 @@ Nodes produce typed proposals (`DecisionProposal`, `NodeResult`). Only
 
 ```
 forge/
+  cli.py          build_trace_report/build_inspect_report/
+                  build_list_runs_report/build_run_attempts_summary — pure
+                  string builders behind `forge trace`/`inspect`/`list`/
+                  `run`/`resume`; the T20-exempt printing/argparse/
+                  interactive prompts live in scripts/forge_cli.py (the
+                  console_scripts entry point)
+  project.py      per-project `.forge/` discovery: find_repo_root/
+                  discover_project resolve the enclosing git repo (same
+                  subprocess pattern as isolation/worktree_manager.py) and
+                  ensure_forge_dir creates `.forge/forge.db` +
+                  `.forge/worktrees/` and a `.gitignore` entry if missing.
+                  NotAGitRepoError is the typed signal scripts/forge_cli.py
+                  catches to show the interactive `git init` prompt — this
+                  module itself never prints or reads stdin
   models/        typed contracts (Pydantic): common, request, graph,
                   attempt, evidence, decision, permissions, model_registry,
                   run, trace
@@ -67,7 +81,16 @@ forge/
   modes/          feature_blast.py — build_feature_blast_request_and_graph,
                   the descoped M7 slice's Request+draft GraphVersion
                   builder; the caller still runs the draft through
-                  compile_and_validate itself, same as any other graph
+                  compile_and_validate itself, same as any other graph.
+                  custom_dag.py — build_custom_dag_request_and_graph loads
+                  a `.forge/dags/*.json` template (Mode.CUSTOM,
+                  Request.template_name names which one), validates every
+                  task's node_type/permission_profile against the real
+                  registries (CustomDagError names the file and bad value
+                  on failure), substitutes `{{ input }}` placeholders, and
+                  hands back the same kind of draft for the caller to run
+                  through compile_and_validate — never touches
+                  deploy_authorized/Budgets itself, both are caller-supplied
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,

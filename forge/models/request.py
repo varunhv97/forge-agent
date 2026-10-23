@@ -27,3 +27,7 @@ class Request(BaseModel):
     deploy_authorized: bool = False
     budgets: Budgets
     created_at: datetime
+    # Set when mode == Mode.CUSTOM: names which custom DAG template (its
+    # DagDefinition.name, from forge/modes/custom_dag.py) produced this
+    # request. Always None for every other mode.
+    template_name: str | None = None

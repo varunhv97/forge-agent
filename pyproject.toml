@@ -18,8 +18,11 @@ dependencies = [
     "httpx==0.28.1",
 ]
 
+[project.scripts]
+forge = "scripts.forge_cli:main"
+
 [tool.setuptools.packages.find]
-include = ["forge*"]
+include = ["forge*", "scripts*"]
 
 [tool.black]
 line-length = 100

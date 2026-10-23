@@ -110,6 +110,20 @@ class Store:
             raise NotFoundError(f"run '{run_id}' not found")
         return Run.model_validate_json(row["data"])
 
+    def list_runs(self) -> list[Run]:
+        """
+        Every run, newest-updated first. `updated_at` lives inside the
+        JSON `data` blob rather than as its own indexed column (unlike
+        `version` on graph_versions), so the ordering is applied in Python
+        after the row-to-model mapping rather than via `ORDER BY` — the
+        row fetch itself still follows the exact same pattern as every
+        other `load_*` method here.
+        """
+        rows = self._conn.execute("SELECT data FROM runs").fetchall()
+        runs = [Run.model_validate_json(r["data"]) for r in rows]
+        runs.sort(key=lambda r: r.updated_at, reverse=True)
+        return runs
+
     # -- attempts ---------------------------------------------------------
 
     def save_attempt(self, attempt: Attempt) -> None:
