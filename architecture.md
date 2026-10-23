@@ -21,12 +21,22 @@ Nodes produce typed proposals (`DecisionProposal`, `NodeResult`). Only
 
 ```
 forge/
-  cli.py          build_trace_report/build_inspect_report/
-                  build_list_runs_report/build_run_attempts_summary — pure
-                  string builders behind `forge trace`/`inspect`/`list`/
-                  `run`/`resume`; the T20-exempt printing/argparse/
-                  interactive prompts live in scripts/forge_cli.py (the
-                  console_scripts entry point)
+  cli.py          The one data layer `forge trace`/`inspect`/`list`/
+                  `run`/`resume` and the TUI both read from. `compute_run_list`/
+                  `compute_run_inspection`/`compute_trace_entries`/
+                  `compute_run_attempts_summary` are pure readers over
+                  `Store` returning frozen dataclasses (`RunListEntry`,
+                  `RunInspection`/`TaskStatusInfo`/`GateStatus`,
+                  `TraceEntry`, `RunAttemptsSummary`) — no string
+                  formatting, no Textual imports; `compute_run_inspection`
+                  is the single place a task's status is derived from its
+                  latest attempt. `build_trace_report`/`build_inspect_report`/
+                  `build_list_runs_report`/`build_run_attempts_summary` are
+                  thin plain-text formatters over the matching `compute_*`
+                  result, behind `forge trace`/`inspect`/`list`/`run`/
+                  `resume`; the T20-exempt printing/argparse/interactive
+                  prompts live in scripts/forge_cli.py (the console_scripts
+                  entry point)
   project.py      per-project `.forge/` discovery: find_repo_root/
                   discover_project resolve the enclosing git repo (same
                   subprocess pattern as isolation/worktree_manager.py) and
@@ -213,11 +223,15 @@ forge/
                     binding ("Build DAG") pushes dag_builder_screen.py's
                     DagBuilderScreen — the only change this module made
                     for the visual DAG builder; everything else about it
-                    lives in that new module. Reuse forge/cli.py's
-                    build_trace_report/build_inspect_report (and two of
-                    its private helpers, _latest_attempts_by_task/
-                    _task_status) rather than re-deriving status data;
-                    status text is colored via the active theme's own
+                    lives in that new module. DashboardScreen.refresh_runs
+                    and LiveRunScreen.refresh_run call forge/cli.py's
+                    compute_run_list/compute_run_inspection directly for
+                    run-list rows and per-task status/latest-attempt data
+                    (M9 phase 7 — the only place that derivation happens
+                    now); RunSummaryScreen still reuses
+                    build_inspect_report's plain text as-is for a
+                    terminal run's static summary. Status text is colored
+                    via the active theme's own
                     $success/$warning/$error variables, never hand-rolled
                     hex. LiveRunScreen renders two views of the same poll
                     tick's data, toggled with `g`: the original flat task

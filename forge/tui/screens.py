@@ -41,10 +41,10 @@ from textual.widgets import (
 from textual.widgets.option_list import Option
 
 from forge.cli import (
-    _latest_attempts_by_task,
-    _task_status,
     build_inspect_report,
-    build_trace_report,
+    compute_run_inspection,
+    compute_run_list,
+    compute_trace_entries,
 )
 from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
@@ -234,31 +234,24 @@ class DashboardScreen(Screen[None]):
 
     def refresh_runs(self) -> None:
         app = _get_app(self)
-        runs = app.store.list_runs()
+        entries = compute_run_list(app.store)
         colors = app.get_css_variables()
 
         table = self.query_one("#runs-table", DataTable)
         table.clear()
         self._row_run_ids = []
-        for run in runs:
-            try:
-                request = app.store.load_request(run.request_id)
-                objective = request.objective_text
-                mode_label = request.template_name or request.mode.value
-            except NotFoundError:
-                objective = "(request not found)"
-                mode_label = "-"
+        for entry in entries:
             table.add_row(
-                run.id,
-                mode_label,
-                objective,
-                Text(run.status.value, style=_status_style(colors, run.status.value)),
-                _fmt_dt(run.updated_at),
-                key=run.id,
+                entry.id,
+                entry.mode,
+                entry.objective,
+                Text(entry.status.value, style=_status_style(colors, entry.status.value)),
+                _fmt_dt(entry.updated_at),
+                key=entry.id,
             )
-            self._row_run_ids.append(run.id)
+            self._row_run_ids.append(entry.id)
 
-        empty = not runs
+        empty = not entries
         table.display = not empty
         self.query_one("#empty-state", Static).display = empty
         if empty and not self._auto_opened_new_session:
@@ -572,7 +565,7 @@ class LiveRunScreen(Screen[None]):
     def __init__(self, run_id: str) -> None:
         super().__init__()
         self.run_id = run_id
-        self._trace_lines_written = 0
+        self._trace_entries_written = 0
         self._showing_graph = False
         self._layout: DagLayout | None = None
         self._layout_graph_version_id: str | None = None
@@ -603,14 +596,17 @@ class LiveRunScreen(Screen[None]):
     def refresh_run(self) -> None:
         app = _get_app(self)
         try:
-            run = app.store.load_run(self.run_id)
+            inspection = compute_run_inspection(app.store, self.run_id)
         except NotFoundError:
             return
-        graph = app.store.load_graph_version(run.active_graph_version_id)
-        attempts = app.store.load_attempts(self.run_id)
-        latest_by_task = _latest_attempts_by_task(attempts)
+        run, graph = inspection.run, inspection.graph
+        latest_by_task = {
+            task_id: info.latest_attempt
+            for task_id, info in inspection.task_statuses.items()
+            if info.latest_attempt is not None
+        }
         colors = app.get_css_variables()
-        statuses = {task.id: _task_status(task, latest_by_task) for task in graph.tasks}
+        statuses = {task_id: info.status for task_id, info in inspection.task_statuses.items()}
 
         elapsed = datetime.now(UTC) - run.created_at
         header_text = Text()
@@ -645,13 +641,21 @@ class LiveRunScreen(Screen[None]):
         if table.row_count:
             table.move_cursor(row=min(previous_cursor_row, table.row_count - 1))
 
-        report = build_trace_report(app.store, self.run_id)
-        lines = report.split("\n")
-        if len(lines) > self._trace_lines_written:
+        # Appends only the trace entries not yet rendered, tracked by how
+        # many entries (not lines of rendered text) have been written so
+        # far — walking `compute_trace_entries`'s structured list directly
+        # rather than diffing `build_trace_report`'s rendered text line by
+        # line. An entry's own text can itself be multi-line (e.g. a graph
+        # revision's invalidated-evidence note) and is still written in one
+        # `log.write` call; `_trace_entries_written` only ever grows by
+        # this call, so a repeat call with the same entries re-renders
+        # nothing twice.
+        entries = compute_trace_entries(app.store, self.run_id)
+        if len(entries) > self._trace_entries_written:
             log = self.query_one("#trace-log", RichLog)
-            for line in lines[self._trace_lines_written :]:
-                log.write(line)
-            self._trace_lines_written = len(lines)
+            for entry in entries[self._trace_entries_written :]:
+                log.write(f"[{entry.timestamp.isoformat(timespec='seconds')}] {entry.text}")
+            self._trace_entries_written = len(entries)
 
         if self._layout is None or self._layout_graph_version_id != graph.id:
             self._layout = compute_dag_layout(graph.tasks, graph.edges)

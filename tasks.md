@@ -90,12 +90,13 @@ Commit messages hold the full history; this file is a short index.
       (pure, returns strings); `scripts/forge_cli.py` is the thin,
       T20-exempt script that parses args and prints.
 
-- [ ] **M9: Interactive TUI shell, per-project state, user-authored custom
+- [x] **M9: Interactive TUI shell, per-project state, user-authored custom
       DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
       live-run/resume — also done; phase 3 — the DAG view on the live-run
       screen — also done; phase 4 — zoom/pan/minimap on that DAG view —
       also done; phase 5 — the visual DAG builder — also done; phase 6 —
-      mid-run chat into a live EXECUTION session — also done).** Scope
+      mid-run chat into a live EXECUTION session — also done; phase 7 —
+      the CLI/TUI shared data layer — also done. M9 is complete.)** Scope
       settled via mockups and discussion. The first pass
       was everything buildable and fully testable as plain Python/CLI;
       this second pass is the actual Textual shell on top of it.
@@ -541,16 +542,58 @@ Commit messages hold the full history; this file is a short index.
         prior TUI phase used): `#chat-input` renders below the graph
         view, enabled with its live placeholder mid-attempt.
 
-      **Remaining:** `forge/cli.py` moving from returning strings to
-      structured data so the TUI and plain-text commands share one data
-      layer (the TUI currently reuses `forge/cli.py`'s string-building
-      functions — `build_trace_report`/`build_inspect_report` — directly,
-      plus two of its underlying private helpers,
-      `_latest_attempts_by_task`/`_task_status`, rather than that
-      refactor). This is now the only remaining item in M9.
+      Done (phase 7 — `forge/cli.py` becomes the one shared data layer):
+      - `forge/cli.py` gained a set of frozen dataclasses
+        (`RunListEntry`, `TaskStatusInfo`, `GateStatus`, `RunInspection`,
+        `TraceEntry`, `RunAttemptsSummary`) and matching `compute_*`
+        functions (`compute_run_list`, `compute_run_inspection`,
+        `compute_trace_entries`, `compute_run_attempts_summary`) — pure
+        readers over `Store`, no string formatting, no Textual imports.
+        `build_trace_report`/`build_inspect_report`/
+        `build_list_runs_report`/`build_run_attempts_summary` are now thin
+        formatters over the matching `compute_*` result, producing the
+        exact same plain-text output as before (verified against
+        `tests/cli/test_cli.py`'s existing exact-string assertions,
+        unchanged). `compute_run_inspection` is the one place
+        `_task_status`/`_latest_attempts_by_task` (now private helpers
+        used only inside `forge/cli.py` itself) derive a task's status
+        from its latest attempt — the first duplication point this phase
+        existed to remove.
+      - `forge/tui/screens.py`: `DashboardScreen.refresh_runs` now calls
+        `compute_run_list` instead of its own `Store.list_runs` +
+        per-run `load_request` loop (the third independent query this
+        phase's task called out). `LiveRunScreen.refresh_run` now calls
+        `compute_run_inspection` directly for every task's status/latest
+        attempt instead of importing `_task_status`/
+        `_latest_attempts_by_task` from `forge/cli.py` — those two names
+        are no longer imported anywhere outside `forge/cli.py`.
+      - The second duplication point — `LiveRunScreen`'s trace tail —
+        now calls `compute_trace_entries` and tracks how many *entries*
+        (`self._trace_entries_written`, renamed from
+        `_trace_lines_written`) it has already appended to `#trace-log`,
+        rather than calling `build_trace_report` and diffing how many
+        *lines* of its rendered text were already written. A multi-line
+        entry (e.g. a graph revision's invalidated-evidence note) is
+        still written in one `RichLog.write` call instead of two,
+        rendering identically since `RichLog` already splits embedded
+        newlines into separate visual lines. Checked specifically for
+        this phase's own concurrency lesson: the first poll tick starts
+        from `_trace_entries_written == 0` and renders every entry
+        exactly once (confirmed by the existing `test_app.py` Pilot
+        tests, which exercise several poll ticks over a real run), and
+        `compute_trace_entries` is a pure read with no side effect, so
+        calling it more than once (e.g. from a retried poll) can never
+        double-render — only the append loop's own bookkeeping decides
+        what's new.
+      - No change to `forge inspect`/`forge trace`/`forge list`'s actual
+        printed output — this was a structural refactor, not a content
+        change. `tests/cli/test_cli.py` and
+        `tests/cli/test_run_resume_list.py`'s exact-string assertions
+        pass unmodified. Full suite (`pytest`, 312 tests) run twice,
+        clean both times; `black`/`ruff`/`mypy --strict` all clean on
+        `forge/`, `scripts/`, `tests/`.
 
-Everything after M9 (other execution-runtime adapters, modes beyond
-custom-DAG templates) is backlog. See `requirements.md`.
+Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps
 

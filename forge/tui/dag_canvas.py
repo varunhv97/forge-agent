@@ -237,7 +237,7 @@ def render_dag_canvas(
 ) -> Text:
     """
     `statuses` maps task id -> status string, same source `LiveRunScreen`
-    already derives via `forge.cli._task_status`. `style_for_status` is
+    already derives via `forge.cli.compute_run_inspection`. `style_for_status` is
     `screens._status_style` partially applied over the active theme's
     `get_css_variables()` — this module never picks colors itself. A
     caller with no real run status yet (the DAG builder, authoring a
