@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import queue
 from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, HookContext, HookInput, HookMatcher
-from claude_agent_sdk import query as sdk_query
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    HookContext,
+    HookInput,
+    HookMatcher,
+)
 from claude_agent_sdk.types import SyncHookJSONOutput
 
 from forge.isolation.hooks import (
@@ -157,6 +164,49 @@ class ExecutionResult:
         return [entry for entry in self.decisions if not entry.decision.allowed]
 
 
+# How often `_forward_chat_messages` polls the cross-thread `queue.Queue`
+# for a new chat message, in seconds. A short non-blocking `get_nowait()`
+# poll rather than `queue.Queue.get(timeout=...)` — that call blocks the
+# *calling* thread (here, the event loop thread the receive loop also
+# runs on) for the whole timeout regardless of what else needs to run,
+# which is exactly the "must not block the receive loop" constraint this
+# is standing in for. Short enough that a chat message sent mid-turn
+# reaches `client.query()` well before an ordinary turn's own response
+# finishes.
+_CHAT_POLL_INTERVAL_SECONDS = 0.05
+
+
+async def _forward_chat_messages(
+    client: ClaudeSDKClient,
+    chat_queue: queue.Queue[str],
+    stop_event: asyncio.Event,
+) -> None:
+    """
+    Polls `chat_queue` for a free-form chat message and sends each one into
+    `client`'s already-open session via `client.query()` — the *same*
+    client instance the receive loop in `run_execution_attempt` is reading
+    from, which is what actually lets a chat message join the live session
+    rather than starting a separate one. `chat_queue` is a plain
+    `queue.Queue`, filled from a different thread than the one running
+    this coroutine's event loop (`forge/tui/runner.py`'s `RunWorker` sets
+    it up per attempt; the TUI's main thread puts messages onto it) —
+    inherently thread-safe for put/get, so no extra locking is needed here.
+
+    Stops as soon as `stop_event` is set, which happens the moment the
+    receive loop's own turn finishes (see `run_execution_attempt`).
+    Anything still sitting on the queue after that is left alone — it's
+    `RunWorker`'s job to decide what happens to a message that loses this
+    race, not this function's.
+    """
+    while not stop_event.is_set():
+        try:
+            message = chat_queue.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(_CHAT_POLL_INTERVAL_SECONDS)
+            continue
+        await client.query(message)
+
+
 async def run_execution_attempt(
     *,
     prompt: str,
@@ -164,22 +214,45 @@ async def run_execution_attempt(
     worktree_path: str,
     model: str,
     max_turns: int | None = None,
+    chat_queue: queue.Queue[str] | None = None,
 ) -> ExecutionResult:
     """
     Runs one execution node's prompt through a live Claude Agent SDK
     session, scoped to `worktree_path` and enforced by `profile`.
 
+    Uses `ClaudeSDKClient` (persistent, bidirectional) rather than the
+    one-shot `query()` function specifically so a chat message can be
+    injected into the *same* open session mid-attempt: `connect(prompt)`
+    opens it and sends the initial message, `receive_response()` streams
+    that turn's output to completion — draining its generator the exact
+    same way `query()`'s was drained before this swap — and `disconnect()`
+    closes it afterward, all inside the one `asyncio.run()` call
+    `sdk_node_runner.run_sdk_node` already wraps this in; nothing here
+    changes when that event loop starts or stops relative to the
+    scheduler's dispatch call.
+
+    When `chat_queue` is given, `_forward_chat_messages` runs concurrently
+    with the receive loop (two tasks, one event loop) and calls
+    `client.query()` on this same client for every message that arrives on
+    it before the turn finishes. With no queue at all (the default), this
+    is a plain `ClaudeSDKClient` turn with nothing injected — the
+    observably-identical baseline this swap was proven against before chat
+    was layered on top of it. A failure in the chat-forwarding task itself
+    (e.g. the transport having already gone away) is swallowed rather than
+    allowed to replace whatever the receive loop itself produced — chat is
+    additive to the attempt, never a way for it to fail.
+
     This makes a real call to the Anthropic API via the bundled Claude Code
     CLI subprocess and therefore requires network access and either
     `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session, which is
     why this function has no accompanying live-call test in the offline
-    suite (`scripts/live_smoke_test.py` exercises it live). Every
-    other piece of this module (the translation functions and
+    suite (`scripts/live_smoke_test.py` exercises it live). Every other
+    piece of this module (the translation functions and
     `build_claude_agent_options`) is tested without the network, since
-    they're pure logic over plain data. This function's job is only to wire
-    those pieces to `claude_agent_sdk.query`; see
-    `tests/adapters/test_sdk_execution_adapter.py` for what is and isn't
-    covered, and why.
+    they're pure logic over plain data; the concurrency this function adds
+    is tested instead against a fake `ClaudeSDKClient` double — see
+    `tests/adapters/execution/test_sdk_execution_adapter.py` for what is
+    and isn't covered, and why.
     """
     decision_log: list[DecisionLogEntry] = []
     options = build_claude_agent_options(
@@ -189,5 +262,39 @@ async def run_execution_attempt(
         max_turns=max_turns,
         decision_log=decision_log,
     )
-    messages = [message async for message in sdk_query(prompt=prompt, options=options)]
+    messages: list[Any] = []
+    client = ClaudeSDKClient(options=options)
+    await client.connect(prompt)
+    try:
+        stop_event = asyncio.Event()
+
+        async def _receive() -> None:
+            try:
+                async for message in client.receive_response():
+                    messages.append(message)
+            finally:
+                stop_event.set()
+
+        if chat_queue is None:
+            await _receive()
+        else:
+            receive_task = asyncio.ensure_future(_receive())
+            chat_task = asyncio.ensure_future(
+                _forward_chat_messages(client, chat_queue, stop_event)
+            )
+            try:
+                await receive_task
+            finally:
+                chat_task.cancel()
+                try:
+                    await chat_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:  # noqa: BLE001, S110 - a chat-forwarding failure
+                    # (e.g. the transport already gone) must never mask or
+                    # replace the receive loop's own result for this attempt;
+                    # see this function's docstring.
+                    pass
+    finally:
+        await client.disconnect()
     return ExecutionResult(messages=messages, decisions=decision_log)

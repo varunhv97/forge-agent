@@ -481,6 +481,19 @@ class LiveRunScreen(Screen[None]):
     (`#graph-minimap`) answering "where am I" from that same scroll
     position. All three are only active — and only shown in the footer —
     while the graph view itself is visible (`check_action`, below).
+
+    `#chat-input` (M9 phase 6) is a free-form message into whatever
+    EXECUTION attempt is *currently* live, if any — always present below
+    both views, never hidden by the list/graph toggle. Every poll tick
+    re-reads `ForgeApp.active_chat_queue_for(self.run_id)` (which is
+    `None` whenever there's no chattable attempt in flight right now —
+    before the first attempt, between attempts, during a MECHANICAL one
+    like `deploy_exec`, or after the run finishes) and disables the input
+    with an explanatory placeholder when it is, rather than silently
+    swallowing whatever's typed. Submitting puts the message straight
+    onto that `queue.Queue` (see `forge/tui/runner.py::RunWorker`) — never
+    anything else; it reaches the live session the same way the model's
+    own reasoning does, with no bypass of the controller/hook boundary.
     """
 
     # Panning moves by a fixed character step per keypress rather than the
@@ -534,6 +547,14 @@ class LiveRunScreen(Screen[None]):
         color: $text-muted;
         border-top: solid $panel;
     }
+    LiveRunScreen #chat-row {
+        height: auto;
+        padding: 0 1;
+        border-top: solid $panel;
+    }
+    LiveRunScreen #chat-input {
+        width: 1fr;
+    }
     """
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("g", "toggle_graph_view", "Graph view"),
@@ -566,6 +587,8 @@ class LiveRunScreen(Screen[None]):
         with VerticalScroll(id="graph-view"):
             yield Static("", id="dag-canvas")
         yield Static("", id="graph-minimap")
+        with Horizontal(id="chat-row"):
+            yield Input(id="chat-input", placeholder="Chat not available", disabled=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -647,6 +670,7 @@ class LiveRunScreen(Screen[None]):
         )
         self.query_one("#dag-canvas", Static).update(canvas_text)
         self._update_minimap()
+        self._refresh_chat_input()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         return not (action in self._GRAPH_ONLY_ACTIONS and not self._showing_graph)
@@ -751,6 +775,48 @@ class LiveRunScreen(Screen[None]):
             )
             text += f"   rows {v_bar}"
         minimap.update(text)
+
+    # -- chat (M9 phase 6) ----------------------------------------------------
+
+    def _refresh_chat_input(self) -> None:
+        """
+        Re-derives `#chat-input`'s enabled/disabled state and placeholder
+        from `ForgeApp.active_chat_queue_for` every poll tick — never
+        assumed to only change once, since a run moves between chattable
+        (an EXECUTION attempt in flight) and not (no attempt yet, a
+        MECHANICAL attempt like `deploy_exec`, between attempts, or the
+        run has finished) any number of times over its life.
+        """
+        chat_input = self.query_one("#chat-input", Input)
+        available = _get_app(self).active_chat_queue_for(self.run_id) is not None
+        chat_input.disabled = not available
+        chat_input.placeholder = (
+            "Message the live session and press Enter..."
+            if available
+            else "Chat not available right now (no live execution attempt)"
+        )
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "chat-input":
+            return
+        message = event.value.strip()
+        if not message:
+            return
+        chat_queue = _get_app(self).active_chat_queue_for(self.run_id)
+        if chat_queue is None:
+            # Lost the race against the attempt finishing (or there was
+            # never one to chat with) — rejected, not silently dropped:
+            # the user is told why, and their typed text is left in place
+            # to retry rather than being cleared as if it had sent.
+            self.app.notify(
+                "Chat not available right now — no live execution attempt.",
+                severity="warning",
+            )
+            self._refresh_chat_input()
+            return
+        chat_queue.put(message)
+        event.input.value = ""
+        self.app.notify("Message sent to the live session.", timeout=2)
 
 
 # -- run summary (terminal runs, opened from the dashboard) ----------------------

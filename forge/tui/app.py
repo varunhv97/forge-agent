@@ -21,6 +21,7 @@ where two things are writing to the database at once.
 
 from __future__ import annotations
 
+import queue
 from pathlib import Path
 from typing import ClassVar
 
@@ -188,6 +189,23 @@ class ForgeApp(App[None]):
             self._live_workers[run_id] = worker
             worker.start()
         self.push_screen(LiveRunScreen(run_id))
+
+    def active_chat_queue_for(self, run_id: str) -> queue.Queue[str] | None:
+        """
+        The live chat queue for `run_id`'s currently in-flight EXECUTION
+        attempt, if one exists right now — `None` whenever there's
+        nothing to chat with: no `RunWorker` for this run at all, the
+        worker exists but is between attempts, or its current attempt is
+        MECHANICAL (`deploy_exec` etc. never get a chat queue — see
+        `forge/tui/runner.py`'s own docstring for why that needs no
+        separate check here). `LiveRunScreen`'s chat input polls this
+        directly rather than reaching into a `RunWorker` itself, same as
+        every other screen -> app data access in this module.
+        """
+        worker = self._live_workers.get(run_id)
+        if worker is None:
+            return None
+        return worker.active_chat_queue
 
 
 def run_tui(db_path_override: Path | None = None) -> int:

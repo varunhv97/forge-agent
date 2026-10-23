@@ -94,7 +94,8 @@ Commit messages hold the full history; this file is a short index.
       DAGs (non-TUI slice done; TUI phase 2 — dashboard/new-session/
       live-run/resume — also done; phase 3 — the DAG view on the live-run
       screen — also done; phase 4 — zoom/pan/minimap on that DAG view —
-      also done; phase 5 — the visual DAG builder — also done).** Scope
+      also done; phase 5 — the visual DAG builder — also done; phase 6 —
+      mid-run chat into a live EXECUTION session — also done).** Scope
       settled via mockups and discussion. The first pass
       was everything buildable and fully testable as plain Python/CLI;
       this second pass is the actual Textual shell on top of it.
@@ -451,15 +452,102 @@ Commit messages hold the full history; this file is a short index.
         changed it. Run twice with no failures to check for the kind of
         timing issue two earlier phases hit.
 
+      Done (phase 6 — mid-run chat into a live EXECUTION session):
+      - `forge/adapters/execution/sdk_execution_adapter.py`'s
+        `run_execution_attempt` swapped the one-shot `query()` function
+        for a persistent `ClaudeSDKClient`: `connect(prompt)` opens the
+        session (sending the initial message, same as `query()` did),
+        `receive_response()` drains that turn's output the same way
+        `query()`'s generator was drained before, `disconnect()` closes
+        it — all still inside the one `asyncio.run()` call
+        `sdk_node_runner.run_sdk_node` already wrapped this in; neither
+        that call nor the scheduler's `dispatch_execution_attempt`
+        changed at all. A new optional `chat_queue: queue.Queue[str] |
+        None` parameter (plumbed through `run_sdk_node` too, keyword-only
+        and `None` by default so every existing caller is unaffected) is
+        what a chat message rides in on: when given,
+        `_forward_chat_messages` runs concurrently with the receive loop
+        and calls `client.query()` on that *same* client for every
+        message it polls off the queue (a non-blocking `get_nowait()` on
+        a 0.05s timer, specifically so it never blocks the receive loop
+        itself) until an `asyncio.Event` signals the turn has finished. A
+        failure inside that forwarding task (e.g. the transport already
+        gone) is caught and dropped rather than allowed to replace the
+        receive loop's own result — chat is additive, never a new way for
+        the attempt itself to fail.
+      - `forge/tui/runner.py`'s `RunWorker` gained `active_chat_queue:
+        queue.Queue[str] | None`, non-`None` for exactly the duration of
+        one EXECUTION attempt. `_run_sdk_node_with_chat` (now what's
+        wired in as the scheduler's `execution_runner`, in place of
+        `run_sdk_node` directly) creates a fresh queue, sets
+        `active_chat_queue`, calls `run_sdk_node(..., chat_queue=...)`,
+        and clears it back to `None` in a `finally` regardless of outcome.
+        `run_to_completion` only ever calls `execution_runner` for an
+        EXECUTION-kind task — `dispatch_mechanical_attempt` never
+        references it at all — so being called through this wrapper *is*
+        the "this attempt is chattable" signal; `deploy_exec` and every
+        other MECHANICAL node needed no code change and never gets a
+        queue. A message `put` after the queue has already gone back to
+        `None` (the attempt finished) lands nowhere special: a plain
+        `queue.Queue.put` never raises, it's just not read by anything.
+      - `forge/tui/app.py`'s `ForgeApp.active_chat_queue_for(run_id)` is
+        the one new read-only accessor `LiveRunScreen` calls — `None` when
+        there's no `RunWorker` for that run at all, or its
+        `active_chat_queue` is currently `None`.
+      - `LiveRunScreen` (`forge/tui/screens.py`) gained `#chat-input`, an
+        `Input` below both the list and graph views (always present,
+        never hidden by the `g` toggle). Every 0.75s poll tick
+        (`_refresh_chat_input`) re-derives its `disabled`/`placeholder`
+        from `active_chat_queue_for` — enabled with an inviting
+        placeholder while chattable, disabled with an explanatory one
+        ("Chat not available right now...") otherwise, never silently
+        accepting input with nowhere for it to go. `on_input_submitted`
+        re-checks the queue at submit time too (defense against the
+        message-arrives-right-as-the-attempt-finishes race): if it's
+        still there, the message is `put` on it and the input is cleared;
+        if not, the attempt is rejected with a visible warning notify and
+        the typed text is left in place to retry, never cleared as if it
+        had actually been sent.
+      - Tests: `tests/adapters/execution/test_sdk_execution_adapter.py`
+        gained a fake standing in for `ClaudeSDKClient` itself
+        (connect/query/receive_response/disconnect, with a deliberately
+        generous delay between response chunks so a concurrently-running
+        chat-forwarding loop has a real window to act) — a baseline test
+        proving the swap alone changes nothing observable, a test proving
+        a queued message results in a real `.query()` call on the *same*
+        client instance before the attempt completes, a test proving a
+        message queued after the turn has already finished is never
+        forwarded, and a test proving a forwarding-task failure doesn't
+        replace the receive loop's own result.
+        `tests/adapters/execution/test_sdk_node_runner.py` gained
+        coverage that `chat_queue` is threaded straight through (and
+        defaults to `None`). `tests/tui/test_runner.py` gained coverage
+        that `active_chat_queue` is `None` before a run starts, is set
+        for the EXECUTION task only (not the DAG's `unit_verify_exec`,
+        proving a MECHANICAL attempt never gets one) and cleared once
+        that attempt finishes, and that a message put on it from another
+        thread while the attempt is genuinely still running reaches the
+        (fake) runner blocked reading from it. `tests/tui/test_chat.py` is
+        a real `Pilot`-driven end-to-end pass: the chat input starts
+        disabled, becomes enabled once the worker thread's fake execution
+        runner is actually blocked waiting on the queue, a typed-and-
+        submitted message reaches that runner, the input disables again
+        once the run completes, and a message submitted with no live
+        attempt is rejected (text left in place, nothing queued) rather
+        than silently dropped. Run twice with no failures, per this
+        phase's own lesson about concurrency timing. Also visually
+        confirmed outside the suite via Textual's headless-driver
+        screenshot (no real pty in this sandbox, same approach every
+        prior TUI phase used): `#chat-input` renders below the graph
+        view, enabled with its live placeholder mid-attempt.
+
       **Remaining:** `forge/cli.py` moving from returning strings to
       structured data so the TUI and plain-text commands share one data
       layer (the TUI currently reuses `forge/cli.py`'s string-building
       functions — `build_trace_report`/`build_inspect_report` — directly,
       plus two of its underlying private helpers,
       `_latest_attempts_by_task`/`_task_status`, rather than that
-      refactor). Mid-run chat into a live EXECUTION session is still the
-      biggest open risk in the whole milestone, sized separately — see
-      Known gaps.
+      refactor). This is now the only remaining item in M9.
 
 Everything after M9 (other execution-runtime adapters, modes beyond
 custom-DAG templates) is backlog. See `requirements.md`.
@@ -476,14 +564,3 @@ custom-DAG templates) is backlog. See `requirements.md`.
   Agent SDK only for now.
 - `integration_test_write_exec` and `integration_verify_exec` are registered
   but haven't been exercised end to end yet.
-- M9 mid-run chat: confirmed buildable, not yet built. `claude-agent-sdk`
-  0.2.165 already ships `ClaudeSDKClient` (persistent, bidirectional —
-  `connect()` once, `query()` again for each follow-up, same
-  `ClaudeAgentOptions`/hooks Forge already builds) alongside the one-shot
-  `query()` function `sdk_execution_adapter.py`/`sdk_node_runner.py`
-  actually use today. The real work: `ClaudeSDKClient` keeps an anyio
-  task group alive for its whole `connect()`-to-`disconnect()` lifetime
-  and refuses to be used across async contexts, but `run_sdk_node` opens
-  a fresh event loop per attempt via `asyncio.run()` — switching adapters
-  means giving a session its own long-lived loop (e.g. a background
-  thread) with a thread-safe queue to deliver a chat message into it.

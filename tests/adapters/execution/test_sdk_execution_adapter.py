@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 from collections.abc import Awaitable, Mapping
-from typing import Any, TypeVar, cast
+from typing import Any, ClassVar, TypeVar, cast
 
+import pytest
 from claude_agent_sdk import HookMatcher
 from claude_agent_sdk.types import HookJSONOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput
 
+from forge.adapters.execution import sdk_execution_adapter
 from forge.adapters.execution.sdk_execution_adapter import (
     DecisionLogEntry,
     build_claude_agent_options,
     hook_json_output_from_decision,
     make_pretooluse_hook_callback,
+    run_execution_attempt,
     tool_call_event_from_hook_input,
 )
 from forge.isolation.hooks import HookDecision, build_pretooluse_hook
@@ -213,3 +217,189 @@ def test_build_claude_agent_options_wired_hook_actually_enforces_the_profile():
     assert output["permissionDecision"] == "deny"
     assert decision_log
     assert decision_log[-1].decision.allowed is False
+
+
+# --- run_execution_attempt: the ClaudeSDKClient swap + mid-session chat ---
+#
+# These exercise `run_execution_attempt` against a fake standing in for
+# `claude_agent_sdk.ClaudeSDKClient` itself (connect/query/receive_response/
+# disconnect) rather than a higher-level stand-in for the whole adapter —
+# this is what actually proves the one-shot `query()` -> `ClaudeSDKClient`
+# swap and the mid-session chat injection work, not just that the
+# scheduler eventually reports some `ExecutionRunOutcome`.
+
+
+def _make_fake_client_class(response_chunks: list[list[Any]], *, turn_delay_seconds: float = 0.1):
+    """
+    Builds a fresh fake `ClaudeSDKClient` class (its own `instances` list,
+    so tests never share state) whose `receive_response()` yields
+    `response_chunks` with a deliberate, generous delay before each chunk —
+    giving a concurrently-running chat-forwarding loop a real window to
+    call `.query()` before the "turn" ends. Generous per this phase's own
+    lesson about tight timing racing real concurrency: a flaky failure
+    here should mean a real bug, not an unlucky scheduler.
+    """
+
+    class _FakeClaudeSDKClient:
+        instances: ClassVar[list[Any]] = []
+
+        def __init__(self, options=None):
+            self.options = options
+            self.calls: list[tuple[str, Any]] = []
+            type(self).instances.append(self)
+
+        async def connect(self, prompt):
+            self.calls.append(("connect", prompt))
+
+        async def query(self, message):
+            self.calls.append(("query", message))
+
+        async def receive_response(self):
+            for chunk in response_chunks:
+                await asyncio.sleep(turn_delay_seconds)
+                for message in chunk:
+                    yield message
+
+        async def disconnect(self):
+            self.calls.append(("disconnect", None))
+
+    return _FakeClaudeSDKClient
+
+
+def test_run_execution_attempt_uses_claude_sdk_client_connect_and_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The baseline this swap was built to preserve: with no chat message
+    ever sent, `run_execution_attempt` just connects with the prompt,
+    drains the turn's response, and disconnects — nothing observably
+    different from the one-shot `query()` it replaced.
+    """
+    fake_cls = _make_fake_client_class([["assistant: hello"]])
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+        )
+    )
+
+    assert result.messages == ["assistant: hello"]
+    client = fake_cls.instances[-1]
+    assert client.calls[0] == ("connect", "do the thing")
+    assert client.calls[-1] == ("disconnect", None)
+    assert not any(call[0] == "query" for call in client.calls)
+
+
+def test_chat_message_forwarded_via_query_on_the_same_client_before_attempt_completes(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    A message put on the queue while the attempt is in flight results in a
+    real `.query()` call on the *same* client instance, before the attempt
+    completes — the core proof this phase's cross-thread channel actually
+    reaches a live session rather than, say, starting a second one.
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: part one"], ["assistant: part two"]], turn_delay_seconds=0.2
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    chat_queue: queue.Queue[str] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                chat_queue=chat_queue,
+            )
+        )
+        # Generous but well inside the fake's 0.2s-per-chunk turn: long
+        # enough for connect() and the first receive_response() sleep to
+        # have actually started, short enough to land well before the
+        # turn finishes.
+        await asyncio.sleep(0.05)
+        chat_queue.put("please also check the README")
+        return await attempt
+
+    result = asyncio.run(_drive())
+
+    client = fake_cls.instances[-1]
+    query_calls = [call for call in client.calls if call[0] == "query"]
+    assert query_calls == [("query", "please also check the README")]
+    disconnect_index = client.calls.index(("disconnect", None))
+    query_index = client.calls.index(query_calls[0])
+    assert query_index < disconnect_index  # sent while still "in flight"
+    assert result.messages == ["assistant: part one", "assistant: part two"]
+
+
+def test_chat_message_arriving_after_the_turn_finishes_is_never_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Once the receive loop's own turn has finished, the chat-forwarding
+    loop has already stopped — a message put on the queue after that point
+    is never sent into the (by-then-disconnected) client. This is the
+    concurrency-layer half of "the queue is cleared once the attempt
+    finishes"; `tests/tui/test_runner.py` covers the other half
+    (`RunWorker.active_chat_queue` itself going back to `None`).
+    """
+    fake_cls = _make_fake_client_class([["assistant: done"]], turn_delay_seconds=0.01)
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    chat_queue: queue.Queue[str] = queue.Queue()
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+            chat_queue=chat_queue,
+        )
+    )
+    chat_queue.put("too late")  # the attempt (and its forwarding loop) is already done
+
+    client = fake_cls.instances[-1]
+    assert not any(call[0] == "query" for call in client.calls)
+    assert result.messages == ["assistant: done"]
+
+
+def test_chat_forwarding_failure_does_not_replace_the_receive_loops_own_result(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    If forwarding a chat message itself blows up (e.g. the transport
+    already gone), that must not be allowed to mask or replace whatever
+    the receive loop produced for this attempt — chat is additive, never a
+    new way for the attempt itself to fail.
+    """
+    fake_cls = _make_fake_client_class([["assistant: fine"]], turn_delay_seconds=0.2)
+
+    async def _raising_query(self, message):
+        raise RuntimeError("transport already gone")
+
+    fake_cls.query = _raising_query
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    chat_queue: queue.Queue[str] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                chat_queue=chat_queue,
+            )
+        )
+        await asyncio.sleep(0.05)
+        chat_queue.put("hello")
+        return await attempt
+
+    result = asyncio.run(_drive())
+    assert result.messages == ["assistant: fine"]

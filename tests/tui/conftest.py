@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 from pathlib import Path
 
@@ -134,13 +135,21 @@ def write_branching_dag(repo_root: Path, name: str = "fan-out-verify") -> None:
 
 
 def fake_execution_runner(
-    model: str, prompt: str, profile: object, worktree_path: str
+    model: str,
+    prompt: str,
+    profile: object,
+    worktree_path: str,
+    *,
+    chat_queue: queue.Queue[str] | None = None,
 ) -> ExecutionRunOutcome:
     """
     Stands in for a real `claude` CLI session, the same way
     tests/cli/test_run_resume_list.py's fake does: writes real work into
     the worktree so the mechanical auto-commit safety net has something to
-    commit, without ever touching a real LLM or network.
+    commit, without ever touching a real LLM or network. Accepts (and
+    ignores) `chat_queue` purely to match `run_sdk_node`'s real keyword-only
+    signature — `RunWorker` always calls its configured execution runner
+    with that keyword now (see `forge/tui/runner.py`), chattable or not.
     """
     Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
     return ExecutionRunOutcome(completed=True, summary="wrote a passing test")

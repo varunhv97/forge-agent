@@ -103,14 +103,29 @@ forge/
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,
-                  HookMatcher); sdk_node_runner.py bridges it to the
-                  scheduler's sync ExecutionRunner contract (asyncio.run,
-                  same pattern as the decision adapter's bridge);
-                  codex_cli_adapter.py (command construction + JSONL
-                  parsing, decoupled from the sandbox via a duck-typed
-                  executor); codex_execution_adapter.py (wires the Codex
-                  adapter to docker_sandbox, owns the launch/exec/stop
-                  lifecycle — stop always runs, even on failure)
+                  HookMatcher); run_execution_attempt drives one attempt
+                  through a persistent ClaudeSDKClient (connect/
+                  receive_response/disconnect), not the one-shot query()
+                  function, specifically so a chat message can be
+                  injected mid-session (M9 phase 6) — an optional
+                  chat_queue: queue.Queue[str] | None runs
+                  _forward_chat_messages concurrently with the receive
+                  loop (one asyncio.Event signals when the turn's own
+                  response has finished, which also stops the forwarding
+                  loop), calling client.query() on that same client for
+                  every message polled off the queue; with no queue at
+                  all this is a plain ClaudeSDKClient turn with nothing
+                  injected, the observably-identical baseline the swap
+                  was proven against first. sdk_node_runner.py bridges it
+                  to the scheduler's sync ExecutionRunner contract
+                  (asyncio.run, same pattern as the decision adapter's
+                  bridge), threading chat_queue straight through
+                  (keyword-only, None by default); codex_cli_adapter.py
+                  (command construction + JSONL parsing, decoupled from
+                  the sandbox via a duck-typed executor);
+                  codex_execution_adapter.py (wires the Codex adapter to
+                  docker_sandbox, owns the launch/exec/stop lifecycle —
+                  stop always runs, even on failure)
     decision/     anthropic_api_decision_adapter.py — direct Anthropic
                   Messages API calls with forced tool-use structured output
     deploy/       vercel_adapter.py — VercelDeployAdapter: creates a
@@ -166,13 +181,33 @@ forge/
                     BLOCKED_AWAITING_INPUT, otherwise shows a static
                     inspect summary — also exactly what resuming an
                     orphaned run looks like, since run_to_completion
-                    reconciles orphaned attempts itself
+                    reconciles orphaned attempts itself.
+                    active_chat_queue_for(run_id) (M9 phase 6) is the one
+                    new read-only accessor LiveRunScreen's chat input
+                    polls: None when there's no RunWorker for that run,
+                    or its own active_chat_queue is currently None
     runner.py       RunWorker — one threading.Thread per live run, its
                     own SQLite connection (db.connect, WAL mode), driving
-                    the real run_to_completion with the real registries/
-                    run_sdk_node. Never a sqlite3.Connection shared across
-                    threads; the only writer of run state once a run is
-                    live, same as forge run/resume already are
+                    the real run_to_completion with the real registries.
+                    Never a sqlite3.Connection shared across threads; the
+                    only writer of run state once a run is live, same as
+                    forge run/resume already are.
+                    active_chat_queue: queue.Queue[str] | None (M9 phase
+                    6) is non-None for exactly the duration of one
+                    EXECUTION attempt. _run_sdk_node_with_chat — wired in
+                    as the scheduler's execution_runner in place of
+                    run_sdk_node directly — creates a fresh queue per
+                    attempt, sets active_chat_queue, calls run_sdk_node(
+                    ..., chat_queue=...), and clears it back to None in a
+                    finally regardless of outcome. run_to_completion only
+                    ever calls execution_runner for an EXECUTION-kind
+                    task (dispatch_mechanical_attempt never references it
+                    at all), so being called through this wrapper *is*
+                    the "this attempt is chattable" signal — deploy_exec
+                    and every other MECHANICAL node needed no change and
+                    never gets a queue. A message put after the queue has
+                    already gone back to None lands nowhere: a plain
+                    queue.Queue.put never raises, it's just unread
     screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
                     RunSummaryScreen/ConfirmModal. DashboardScreen's `b`
                     binding ("Build DAG") pushes dag_builder_screen.py's
@@ -209,7 +244,19 @@ forge/
                     proportional bar plus a "ranks X-Y/Z" readout from
                     #graph-view's own real scroll_x/scroll_y/
                     container_size every tick — never a static
-                    placeholder.
+                    placeholder. #chat-input (M9 phase 6) is a free-form
+                    Input below both views, always present regardless of
+                    the `g` toggle. Every poll tick re-derives its
+                    disabled/placeholder from ForgeApp.
+                    active_chat_queue_for(self.run_id) — enabled with an
+                    inviting placeholder while chattable, disabled with
+                    an explanatory one otherwise. on_input_submitted
+                    re-checks the queue again at submit time (the
+                    message-arrives-right-as-the-attempt-finishes race):
+                    present, the message is queued and the input clears;
+                    gone, the attempt is rejected with a visible warning
+                    notify and the typed text is left in place, never
+                    cleared as if it had been sent.
     dag_layout.py   compute_dag_layout(tasks, edges) -> DagLayout — pure,
                     zero Textual imports. rank = longest path from a root
                     (no incoming "dependency" edge), which spreads a
