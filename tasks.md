@@ -656,6 +656,61 @@ Commit messages hold the full history; this file is a short index.
         project's own `files = ["forge", "scripts", "tests"]` config)
         all clean.
 
+- [x] **Post-M9: restyle the TUI to match the original mockups.** A pure
+      visual restyle of `forge/tui/*` — no screen's behavior, keybindings,
+      or data flow changed. Addressed four gaps between the running app
+      and the mockups it was designed from:
+      - `forge/tui/chrome.py`: a new `Chrome` widget (three low-opacity
+        status-colored dot glyphs, via each semantic color's own
+        `-muted` theme token, then a muted `forge — <context>` title)
+        used in place of `Header()` on every screen. Context per screen:
+        the repo name on the dashboard (set in `on_mount`, once
+        `ForgeApp.repo_root` is known — the constructor doesn't have it
+        yet), "new session" on `NewSessionScreen`, the run id on
+        `LiveRunScreen`/`RunSummaryScreen`, "build DAG" on
+        `DagBuilderScreen`. Re-renders on `App.theme_changed_signal`
+        (same subscribe pattern Textual's own `Footer` uses for
+        `bindings_updated_signal`), so the dots/title stay correct
+        across the `t` light/dark toggle.
+      - `forge/tui/panel.py`: a new `LabeledPanel` (a bordered `Vertical`
+        with a small uppercase label mounted as its first child) used
+        for every logical section the mockups boxed separately:
+        `DashboardScreen`'s run table (RUNS), `LiveRunScreen`'s task
+        list/trace log/chat input/DAG canvas (TASKS/TRACE/CHAT/GRAPH),
+        and `DagBuilderScreen`'s node-type palette/inspector/canvas
+        (NODE TYPE PALETTE/INSPECTOR/CANVAS). A real Textual box-model
+        gotcha surfaced building this: a label `Static` with `height: 1`
+        plus its own `border-bottom` rendered as a blank line (the
+        border claimed the only available row) — fixed by giving the
+        label `height: 2`, confirmed with a headless-driver screenshot
+        before and after.
+      - `screens.py` gained `_status_dot_text` (a colored dot glyph
+        *plus* the status word, e.g. `● PASSED`, sharing `_status_style`'s
+        same style) replacing every bare `Text(status, style=...)` call
+        site: the dashboard's run-status column, `LiveRunScreen`'s
+        task-status column, and its run-header status. `dag_canvas.py`
+        already drew status this way per-node and needed no change.
+      - The stock `Footer` is restyled via CSS only (`ForgeApp.CSS`,
+        targeting its own documented `footer-key--key`/
+        `footer-key--description` component classes) so each binding
+        reads as a themed `[key]` chip next to a muted description —
+        no custom footer widget, so `Footer`'s real binding-discovery/
+        `check_action`-driven show/hide behavior (e.g. `LiveRunScreen`'s
+        graph-only actions) is untouched.
+      - Tests: a new `tests/tui/test_chrome.py` (real `Pilot` runs)
+        asserts the chrome dots/title and panel labels actually render,
+        and that task/run/dashboard status cells read `● <status>`, not
+        bare text. `tests/tui/test_app.py::test_g_toggles_between_list_
+        and_graph_view` needed no assertion rewritten (it checks
+        `#graph-view`'s own `display` flag, unaffected by the new
+        `#graph-panel` wrapper added around it) — no existing test's
+        exact-string assertion needed changing, since none of the
+        touched status/run-list/task-table assertions in the existing
+        suite checked literal rendered text (they check `Store`/`Run`
+        state, not Textual's rendered output). Full suite (`pytest`, 323
+        tests) run twice, clean both times; `black`/`ruff`/`mypy`
+        (strict) all clean.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps

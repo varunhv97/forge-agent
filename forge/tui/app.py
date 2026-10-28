@@ -61,6 +61,31 @@ class ForgeApp(App[None]):
     TITLE = "Forge"
     BINDINGS: ClassVar[list[BindingType]] = [Binding("t", "toggle_theme", "Toggle light/dark")]
 
+    # Restyles the stock `Footer` so each binding reads as a visually
+    # distinct `[key] label` — a themed chip for the key (bold, its own
+    # background/foreground) next to a muted description — entirely
+    # through CSS on `Footer`'s own documented component classes
+    # (`footer-key--key`/`footer-key--description`, confirmed from
+    # `textual.widgets._footer`'s source for this installed version
+    # rather than assumed). No behavior changes: `Footer`'s own real
+    # binding-discovery/`check_action`-driven show/hide logic
+    # (`compose`/`bindings_changed`) is untouched, so every screen's
+    # existing `check_action` gating (e.g. `LiveRunScreen`'s graph-only
+    # actions) still controls what the footer shows exactly as before.
+    CSS = """
+    Footer {
+        background: $panel;
+    }
+    .footer-key--key {
+        background: $panel-lighten-1;
+        color: $accent;
+        text-style: bold;
+    }
+    .footer-key--description {
+        color: $text-muted;
+    }
+    """
+
     def __init__(self, *, db_path_override: Path | None = None) -> None:
         super().__init__()
         self._db_path_override = db_path_override

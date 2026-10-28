@@ -218,6 +218,28 @@ forge/
                     never gets a queue. A message put after the queue has
                     already gone back to None lands nowhere: a plain
                     queue.Queue.put never raises, it's just unread
+    chrome.py       Chrome — the three-dot-plus-title bar used in place
+                    of Header() on every screen (post-M9 restyle to match
+                    the original mockups). Dots use each semantic color's
+                    own `-muted` theme token (real hex, e.g. `error-muted`)
+                    for "reduced opacity"; the title is left unstyled and
+                    instead inherits this widget's own `color: $text-muted`
+                    CSS, since that variable's real value (`"auto 60%"`)
+                    is a Textual-CSS-only directive that crashes Rich's
+                    own style parser if passed as a per-span Text style
+                    directly — confirmed empirically (MissingStyle), not
+                    assumed. Re-renders on App.theme_changed_signal.
+    panel.py        LabeledPanel — a bordered Vertical with a small
+                    uppercase label Static mounted as its first child
+                    (post-M9 restyle): the TASKS/TRACE/CHAT/GRAPH/RUNS-
+                    style boxed sections the mockups used, in place of
+                    flat sibling widgets with at most a single divider
+                    border. Purely visual; callers still query_one
+                    whatever they mount inside it by that widget's own
+                    id. The label needs `height: 2`, not 1 — a Textual
+                    box-model gotcha found building this: with `height: 1`
+                    plus the label's own `border-bottom`, the border
+                    claimed the row and the text never painted.
     screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
                     RunSummaryScreen/ConfirmModal. DashboardScreen's `b`
                     binding ("Build DAG") pushes dag_builder_screen.py's
@@ -233,7 +255,17 @@ forge/
                     terminal run's static summary. Status text is colored
                     via the active theme's own
                     $success/$warning/$error variables, never hand-rolled
-                    hex. LiveRunScreen renders two views of the same poll
+                    hex, and (post-M9 restyle) rendered as a colored dot
+                    glyph plus the status word via the new
+                    _status_dot_text helper, not bare colored text, at
+                    every status call site (dashboard run-status column,
+                    LiveRunScreen task-status column and run-header).
+                    Every screen's Header()/Footer siblings are now
+                    chrome.py's Chrome plus panel.py's LabeledPanel
+                    around the task list/trace log/chat input/DAG canvas
+                    (dag_builder_screen.py similarly for its palette/
+                    inspector/canvas) — restyle only, no behavior change.
+                    LiveRunScreen renders two views of the same poll
                     tick's data, toggled with `g`: the original flat task
                     table + trace tail, and a DAG canvas (#graph-view).
                     #graph-view overrides VerticalScroll's own default

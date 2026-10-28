@@ -31,7 +31,6 @@ from textual.widgets import (
     Button,
     DataTable,
     Footer,
-    Header,
     Input,
     Label,
     OptionList,
@@ -50,9 +49,11 @@ from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
 from forge.models.attempt import Attempt
 from forge.modes.custom_dag import CustomDagError, DagTemplateInfo
+from forge.tui.chrome import Chrome
 from forge.tui.dag_builder_screen import DagBuilderScreen
 from forge.tui.dag_canvas import DagDetail, canvas_size, render_dag_canvas, visible_rank_range
 from forge.tui.dag_layout import DagLayout, compute_dag_layout
+from forge.tui.panel import LabeledPanel
 
 if TYPE_CHECKING:
     from forge.tui.app import ForgeApp
@@ -77,6 +78,24 @@ def _status_style(colors: Mapping[str, str], status: str) -> str:
     if status in _RED_STATUSES:
         return f"bold {colors.get('error', 'red')}"
     return ""
+
+
+def _status_dot_text(colors: Mapping[str, str], status: str) -> Text:
+    """
+    A status rendered as a colored dot glyph *plus* its text (`● PASSED`),
+    not bare colored text — every call site that used to build
+    `Text(status, style=_status_style(...))` for a run/task status value
+    now goes through this instead. The dot and the text share the same
+    semantic style (green/amber/red/none, from `_status_style`); an
+    unrecognized status (empty style) still gets a dot, just an
+    un-styled one, so the glyph is always present rather than appearing
+    only for statuses this module happens to recognize.
+    """
+    style = _status_style(colors, status)
+    text = Text()
+    text.append("● ", style=style)
+    text.append(status, style=style)
+    return text
 
 
 def _fmt_dt(dt: datetime) -> str:
@@ -193,6 +212,9 @@ class DashboardScreen(Screen[None]):
     """
 
     DEFAULT_CSS = """
+    DashboardScreen #runs-panel {
+        height: 1fr;
+    }
     DashboardScreen #runs-table {
         height: 1fr;
     }
@@ -219,12 +241,15 @@ class DashboardScreen(Screen[None]):
         self._auto_opened_new_session = False
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield DataTable(id="runs-table", cursor_type="row")
-        yield Static("no runs yet", id="empty-state")
+        yield Chrome(title="forge")
+        with LabeledPanel("RUNS", id="runs-panel"):
+            yield DataTable(id="runs-table", cursor_type="row")
+            yield Static("no runs yet", id="empty-state")
         yield Footer()
 
     def on_mount(self) -> None:
+        app = _get_app(self)
+        self.query_one(Chrome).set_title(f"forge — {app.repo_root.name}")
         table = self.query_one("#runs-table", DataTable)
         table.add_columns("RUN ID", "MODE", "OBJECTIVE", "STATUS", "UPDATED")
         table.focus()
@@ -245,7 +270,7 @@ class DashboardScreen(Screen[None]):
                 entry.id,
                 entry.mode,
                 entry.objective,
-                Text(entry.status.value, style=_status_style(colors, entry.status.value)),
+                _status_dot_text(colors, entry.status.value),
                 _fmt_dt(entry.updated_at),
                 key=entry.id,
             )
@@ -330,7 +355,7 @@ class NewSessionScreen(Screen[None]):
         self._field_names: list[str] = []
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Chrome(title="forge — new session")
         with Vertical(id="mode-picker"):
             yield Static("Choose what to run:", classes="section-title")
             yield OptionList(id="mode-list")
@@ -518,12 +543,20 @@ class LiveRunScreen(Screen[None]):
     LiveRunScreen #list-view {
         height: 1fr;
     }
-    LiveRunScreen #tasks-table {
+    LiveRunScreen #tasks-panel {
         width: 45%;
     }
-    LiveRunScreen #trace-log {
+    LiveRunScreen #tasks-table {
+        height: 1fr;
+    }
+    LiveRunScreen #trace-panel {
         width: 55%;
-        border-left: solid $panel;
+    }
+    LiveRunScreen #trace-log {
+        height: 1fr;
+    }
+    LiveRunScreen #graph-panel {
+        height: 1fr;
     }
     LiveRunScreen #graph-view {
         height: 1fr;
@@ -540,10 +573,8 @@ class LiveRunScreen(Screen[None]):
         color: $text-muted;
         border-top: solid $panel;
     }
-    LiveRunScreen #chat-row {
+    LiveRunScreen #chat-panel {
         height: auto;
-        padding: 0 1;
-        border-top: solid $panel;
     }
     LiveRunScreen #chat-input {
         width: 1fr;
@@ -572,15 +603,18 @@ class LiveRunScreen(Screen[None]):
         self._detail: DagDetail = "full"
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Chrome(title=f"forge — run {self.run_id}")
         yield Static("", id="run-header")
         with Horizontal(id="list-view"):
-            yield DataTable(id="tasks-table", cursor_type="row")
-            yield RichLog(id="trace-log", wrap=True, highlight=False, markup=False)
-        with VerticalScroll(id="graph-view"):
-            yield Static("", id="dag-canvas")
-        yield Static("", id="graph-minimap")
-        with Horizontal(id="chat-row"):
+            with LabeledPanel("TASKS", id="tasks-panel"):
+                yield DataTable(id="tasks-table", cursor_type="row")
+            with LabeledPanel("TRACE", id="trace-panel"):
+                yield RichLog(id="trace-log", wrap=True, highlight=False, markup=False)
+        with LabeledPanel("GRAPH", id="graph-panel"):
+            with VerticalScroll(id="graph-view"):
+                yield Static("", id="dag-canvas")
+            yield Static("", id="graph-minimap")
+        with LabeledPanel("CHAT", id="chat-panel"):
             yield Input(id="chat-input", placeholder="Chat not available", disabled=True)
         yield Footer()
 
@@ -588,6 +622,7 @@ class LiveRunScreen(Screen[None]):
         table = self.query_one("#tasks-table", DataTable)
         table.add_columns("TASK", "NODE TYPE", "STATUS", "ATTEMPT")
         table.focus()
+        self.query_one("#graph-panel").display = False
         self.query_one("#graph-view").display = False
         self.query_one("#graph-minimap").display = False
         self.refresh_run()
@@ -611,7 +646,7 @@ class LiveRunScreen(Screen[None]):
         elapsed = datetime.now(UTC) - run.created_at
         header_text = Text()
         header_text.append(f"Run {run.id}   ", style="bold")
-        header_text.append(run.status.value, style=_status_style(colors, run.status.value))
+        header_text.append_text(_status_dot_text(colors, run.status.value))
         header_text.append(f"   elapsed {_fmt_elapsed(elapsed)}")
         if run.blocker_message:
             header_text.append(
@@ -635,7 +670,7 @@ class LiveRunScreen(Screen[None]):
             table.add_row(
                 task.id,
                 f"{task.node_kind.value}/{task.node_type}",
-                Text(status, style=_status_style(colors, status)),
+                _status_dot_text(colors, status),
                 attempt_label,
             )
         if table.row_count:
@@ -682,6 +717,7 @@ class LiveRunScreen(Screen[None]):
     def action_toggle_graph_view(self) -> None:
         self._showing_graph = not self._showing_graph
         self.query_one("#list-view").display = not self._showing_graph
+        self.query_one("#graph-panel").display = self._showing_graph
         self.query_one("#graph-view").display = self._showing_graph
         self.query_one("#graph-minimap").display = self._showing_graph
         if self._showing_graph:
@@ -849,7 +885,7 @@ class RunSummaryScreen(Screen[None]):
         self.run_id = run_id
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Chrome(title=f"forge — run {self.run_id} summary")
         with VerticalScroll(id="summary-scroll"):
             yield Static("", id="summary-text")
         yield Footer()

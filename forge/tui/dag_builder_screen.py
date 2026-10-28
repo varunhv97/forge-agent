@@ -40,7 +40,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
-from textual.widgets import Button, Footer, Header, Input, Label, OptionList, Static
+from textual.widgets import Button, Footer, Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from forge.models.graph import EdgeSpec, TaskSpec
@@ -54,8 +54,10 @@ from forge.modes.custom_dag import (
     load_dag_definition,
     resolve_permission_profile,
 )
+from forge.tui.chrome import Chrome
 from forge.tui.dag_canvas import render_dag_canvas
 from forge.tui.dag_layout import DagLayoutError, compute_dag_layout
+from forge.tui.panel import LabeledPanel
 
 if TYPE_CHECKING:
     from forge.tui.app import ForgeApp
@@ -393,18 +395,23 @@ class DagBuilderScreen(Screen[None]):
     }
     DagBuilderScreen #builder-sidebar {
         width: 38%;
-        padding: 1 2;
-        border-right: solid $panel;
+    }
+    DagBuilderScreen #palette-panel {
+        height: auto;
     }
     DagBuilderScreen #palette-list {
         height: 10;
     }
-    DagBuilderScreen #builder-inspector {
+    DagBuilderScreen #inspector-panel {
         margin-top: 1;
         height: 1fr;
     }
-    DagBuilderScreen #builder-canvas-area {
+    DagBuilderScreen #builder-inspector {
+        height: 1fr;
+    }
+    DagBuilderScreen #canvas-panel {
         width: 62%;
+        height: 1fr;
     }
     DagBuilderScreen #builder-graph-view {
         height: 1fr;
@@ -447,14 +454,15 @@ class DagBuilderScreen(Screen[None]):
         self.last_saved_path: Path | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header()
+        yield Chrome(title="forge — build DAG")
         yield Static("", id="builder-meta")
         with Horizontal(id="builder-body"):
             with Vertical(id="builder-sidebar"):
-                yield Static("NODE TYPE PALETTE", classes="section-title")
-                yield OptionList(id="palette-list")
-                yield Static("", id="builder-inspector")
-            with Vertical(id="builder-canvas-area"), VerticalScroll(id="builder-graph-view"):
+                with LabeledPanel("NODE TYPE PALETTE", id="palette-panel"):
+                    yield OptionList(id="palette-list")
+                with LabeledPanel("INSPECTOR", id="inspector-panel"):
+                    yield Static("", id="builder-inspector")
+            with LabeledPanel("CANVAS", id="canvas-panel"), VerticalScroll(id="builder-graph-view"):
                 yield Static("", id="builder-canvas")
         yield Footer()
 
