@@ -1028,6 +1028,31 @@ Commit messages hold the full history; this file is a short index.
         fresh-dispatch model-escalation gap noted above — this phase works
         around it consistently (`model_override` slots into the same
         `override-or-default` expression), it doesn't fix it.
+- [x] **Follow-up: a real `ModelRegistry`.** Phase 2 flagged that every live
+      entry point (`forge/tui/app.py`, `forge/tui/runner.py`,
+      `scripts/forge_cli.py`) constructed `ModelRegistry([])` — meaning a
+      custom-DAG task's `model` override, however correctly validated in
+      tests, would always fail eligibility in actual use, since no model was
+      ever registered as eligible for anything. `forge/controller/
+      model_registry.py` gained `build_default_model_registry()`,
+      registering `claude-sonnet-5` (1M context, $2/$10 per MTok, eligible
+      for all three EXECUTION node types plus the one registered decision
+      node type, `retry_or_escalate_policy`), `claude-opus-5` ($5/$25,
+      the three EXECUTION node types), and `claude-haiku-4-5` (200K
+      context, $1/$5, same three — not currently any node type's default,
+      but now a real option a custom-DAG override or future config can
+      reach). Pricing/context figures came from Anthropic's own current
+      published rates, not a guess. `ModelRegistry` keys purely by
+      `model_id` (not `(model_id, adapter_kind)`), so `claude-sonnet-5` gets
+      one entry covering both its execution and decision uses — documented
+      in the function's own docstring, along with the finding that
+      `adapter_kind` is pure metadata nowhere else in the codebase reads.
+      All four call sites now share this one function. Proven end to end
+      (not just toolchain-clean): `ModelRegistry.validate_eligible` now
+      actually succeeds for `claude-opus-5`/`implement_exec` and
+      `claude-sonnet-5`/`retry_or_escalate_policy`, and still correctly
+      rejects a model for a MECHANICAL node type. Full suite (342 tests)
+      run twice, clean both times; `black`/`ruff`/`mypy` (strict) clean.
 
 Everything after M9 is backlog. See `requirements.md`.
 

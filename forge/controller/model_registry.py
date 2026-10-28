@@ -67,6 +67,67 @@ class ModelRegistry:
         return capability
 
 
+def build_default_model_registry() -> ModelRegistry:
+    """
+    The real `ModelRegistry` every live entry point (the TUI, `forge_cli.py`)
+    should construct — every call site previously passed `ModelRegistry([])`,
+    which meant a `model` override in a custom-DAG task (see
+    `custom_dag.py::resolve_model_override`) could never actually pass
+    eligibility in live use, only in tests that built their own populated
+    registry. Pricing/context-window figures are current as of this file's
+    last edit (checked against Anthropic's own published rates, not
+    guessed) — update them if those change.
+
+    `adapter_kind` is currently pure metadata: nothing in this codebase
+    reads it to gate a decision (confirmed — only this file's docstrings
+    and the `ModelCapability` definition itself reference it). Since
+    `ModelRegistry` keys purely by `model_id` (one entry per id, not per
+    `(model_id, adapter_kind)` pair), a model used both ways — claude-sonnet-5
+    is Forge's default for three EXECUTION node types *and* the one
+    registered decision node type (`retry_or_escalate_policy`, see
+    `decision_dispatch.py::DECISION_MODEL_BY_NODE_TYPE`) — gets ONE entry
+    whose `eligible_roles` lists every role it's valid for, tagged with
+    whichever `adapter_kind` best describes its primary use here
+    (`sdk_execution`, since three execution node types default to it versus
+    one decision type).
+    """
+    execution_roles = ["implement_exec", "manual_test_exec", "integration_test_write_exec"]
+    return ModelRegistry(
+        [
+            ModelCapability(
+                provider="anthropic",
+                model_id="claude-sonnet-5",
+                adapter_kind="sdk_execution",
+                supports_tools=True,
+                context_window=1_000_000,
+                cost_per_mtok_in=2.00,
+                cost_per_mtok_out=10.00,
+                eligible_roles=[*execution_roles, "retry_or_escalate_policy"],
+            ),
+            ModelCapability(
+                provider="anthropic",
+                model_id="claude-opus-5",
+                adapter_kind="sdk_execution",
+                supports_tools=True,
+                context_window=1_000_000,
+                cost_per_mtok_in=5.00,
+                cost_per_mtok_out=25.00,
+                eligible_roles=execution_roles,
+            ),
+            ModelCapability(
+                provider="anthropic",
+                model_id="claude-haiku-4-5",
+                adapter_kind="sdk_execution",
+                supports_tools=True,
+                context_window=200_000,
+                cost_per_mtok_in=1.00,
+                cost_per_mtok_out=5.00,
+                eligible_roles=execution_roles,
+            ),
+        ]
+    )
+
+
 def _prior_failures(task_id: str, attempts: list[Attempt]) -> int:
     """
     How many of a task's recorded attempts are FAILED — the one piece of

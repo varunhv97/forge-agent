@@ -40,7 +40,7 @@ from forge.adapters.execution.sdk_node_runner import run_sdk_node
 from forge.controller import db
 from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunOutcome
 from forge.controller.mechanical import MechanicalRunnerRegistry
-from forge.controller.model_registry import ModelRegistry
+from forge.controller.model_registry import build_default_model_registry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import ControllerDependencies, run_to_completion
 from forge.controller.store import Store
@@ -142,7 +142,7 @@ class RunWorker:
                 mechanical_registry=mechanical_registry,
                 node_registry=node_registry,
                 permission_registry=permission_registry,
-                model_registry=ModelRegistry([]),
+                model_registry=build_default_model_registry(),
                 execution_handler_registry=execution_handler_registry,
                 execution_runner=self._run_sdk_node_with_chat,
                 repo_root=self.repo_root,
