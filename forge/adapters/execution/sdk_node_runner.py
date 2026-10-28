@@ -32,6 +32,12 @@ def run_sdk_node(
     same attempt's live session mid-turn. `None` (the default, and the
     only thing every caller outside the TUI ever passes) behaves exactly
     as before this parameter existed.
+
+    `ExecutionRunOutcome.session_id` is threaded straight through from
+    `result.session_id` (the real Claude Agent SDK session id off the
+    turn's terminal `ResultMessage`, or `None` if there wasn't one) — this
+    is the one new thing this bridge adds for the `forge inspect`
+    session-id feature; everything else about this function is unchanged.
     """
     try:
         result = asyncio.run(
@@ -49,4 +55,4 @@ def run_sdk_node(
     summary = f"session completed with {len(result.messages)} message(s)"
     if result.denied_calls:
         summary += f"; {len(result.denied_calls)} tool call(s) denied by permission profile"
-    return ExecutionRunOutcome(completed=True, summary=summary)
+    return ExecutionRunOutcome(completed=True, summary=summary, session_id=result.session_id)

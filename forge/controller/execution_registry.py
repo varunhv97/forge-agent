@@ -23,10 +23,21 @@ class ExecutionRunOutcome:
     never trusts this for `result_commit`/`changed_paths` — those are
     derived mechanically from git afterward, regardless of what a runner
     reports here.
+
+    `session_id` is the real Claude Agent SDK session id (a UUID, carried
+    on the terminal `ResultMessage` of a live session) for a Claude Agent
+    SDK-dispatched attempt, or `None` for anything else (a MECHANICAL
+    runner, a Codex CLI attempt, or an SDK session that never produced a
+    `ResultMessage`). Forge only captures and persists this value — it
+    never acts on it (e.g. no automatic `resume=` wiring into a later
+    attempt); that's a separate, deliberately deferred decision. The point
+    is solely so a person can run `claude --resume <session_id>`
+    themselves to inspect or continue that exact session.
     """
 
     completed: bool
     summary: str = ""
+    session_id: str | None = None
 
 
 # (model, prompt, permission_profile, worktree_path) -> ExecutionRunOutcome

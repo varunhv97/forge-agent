@@ -46,3 +46,14 @@ class Attempt(BaseModel):
     # decision, so a bad token doesn't burn the task's retry budget on
     # three identical, guaranteed-to-fail attempts.
     requires_user_input: bool = False
+    # The real Claude Agent SDK session id (a UUID off the terminal
+    # ResultMessage of a live session) for an EXECUTION attempt dispatched
+    # through the SDK adapter — set by sdk_node_runner.run_sdk_node via
+    # ExecutionRunOutcome.session_id, threaded onto the Attempt by
+    # scheduler.dispatch_execution_attempt. Always None for a MECHANICAL
+    # attempt and for a Codex CLI attempt (out of scope for this field).
+    # Forge only captures and exposes this (via `forge inspect`) for a
+    # person to run `claude --resume <sdk_session_id>` themselves — it is
+    # never read back by Forge itself, and does not affect retry/resume
+    # policy.
+    sdk_session_id: str | None = None

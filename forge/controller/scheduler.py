@@ -541,6 +541,13 @@ def dispatch_execution_attempt(
     attempt.failure_summary = None if passed else summary
     attempt.outputs = output_dict
     attempt.result_commit = result_commit
+    # Captured straight off the runner's own outcome, regardless of
+    # completed/passed — a Claude Agent SDK session can produce a real
+    # session_id even on a turn that ultimately didn't commit anything
+    # worth keeping. None for any runner that doesn't set it (e.g. no
+    # execution runner configured never reaches this line at all; a
+    # MECHANICAL attempt never calls this function).
+    attempt.sdk_session_id = outcome.session_id
 
     evidence = [
         Evidence(

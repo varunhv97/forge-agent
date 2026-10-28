@@ -388,6 +388,18 @@ itself. A `MECHANICAL` task that depends on an EXECUTION one (e.g.
 rather than getting a fresh one — it's verifying that output, not
 starting over.
 
+A Claude Agent SDK attempt's real session id (the UUID the SDK's terminal
+`ResultMessage` carries) is captured the same way: `sdk_execution_adapter.
+run_execution_attempt` pulls it off the drained `messages` list into
+`ExecutionResult.session_id`, `sdk_node_runner.run_sdk_node` threads it into
+`ExecutionRunOutcome.session_id`, and `dispatch_execution_attempt` sets
+`Attempt.sdk_session_id` from that outcome, same as `result_commit`. This is
+capture-and-expose only — `forge inspect <run_id> <task_id>` prints it
+(`claude --resume <sdk_session_id>`, for a person to run themselves);
+nothing in Forge reads it back or passes it into a later attempt's
+`ClaudeAgentOptions`. Always `None` for a MECHANICAL attempt or a Codex CLI
+one.
+
 ## Enforcement, concretely
 
 - Claude Agent SDK attempts: a PreToolUse hook, generated per attempt from

@@ -51,6 +51,7 @@ def _make_attempt(
     result_commit: str | None = None,
     outputs: dict[str, object] | None = None,
     failure_summary: str | None = None,
+    sdk_session_id: str | None = None,
 ) -> Attempt:
     return Attempt(
         id=attempt_id,
@@ -69,6 +70,7 @@ def _make_attempt(
         result_commit=result_commit,
         outputs=outputs or {},
         failure_summary=failure_summary,
+        sdk_session_id=sdk_session_id,
     )
 
 
@@ -329,6 +331,80 @@ def test_build_inspect_report_task_id_commit_diff_strategy(
     assert "result_commit=result-sha changed_paths=['a.py', 'b.py']" in report
     assert "ev-1 kind=test_result passed=True criterion=c1" in report
     assert "[live]" in report
+
+
+def test_build_inspect_report_shows_sdk_session_id_when_present(
+    store: Store, node_registry: NodeTypeRegistry, request_factory, task_factory, graph_factory
+) -> None:
+    """
+    `forge inspect <run_id> <task_id>` must print an SDK-dispatched
+    attempt's real session id somewhere a person can copy straight into
+    `claude --resume <that value>` — the entire point of capturing it.
+    """
+    criterion = AcceptanceCriterion(
+        id="c1", description="unit tests pass", verification_method="automated_test"
+    )
+    req = request_factory(acceptance_criteria=[criterion])
+    store.save_request(req)
+
+    t1 = task_factory("implement", node_type="root_exec", acceptance_criterion_ids=["c1"])
+    graph = graph_factory([t1], version=1)
+    store.save_graph_version(graph)
+    run = _make_run(graph_version_id=graph.id, request_id=req.id)
+    store.save_run(run)
+
+    started = datetime(2026, 1, 1, tzinfo=UTC)
+    attempt = _make_attempt(
+        attempt_id="att-1",
+        run_id=run.id,
+        task_id="implement",
+        graph_version_id=graph.id,
+        status=AttemptStatus.PASSED,
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        result_commit="result-sha",
+        outputs={
+            "result_commit": "result-sha",
+            "changed_paths": ["a.py"],
+            "summary": "did the thing",
+        },
+        sdk_session_id="sess-live-001",
+    )
+    store.save_attempt(attempt)
+
+    report = build_inspect_report(store, node_registry, run.id, "implement")
+
+    assert "sdk_session_id: sess-live-001" in report
+    assert "claude --resume sess-live-001" in report
+
+
+def test_build_inspect_report_omits_sdk_session_id_when_absent(
+    store: Store, node_registry: NodeTypeRegistry, request_factory, task_factory, graph_factory
+) -> None:
+    """A MECHANICAL/no-session attempt (the default) must never print a
+    fabricated or placeholder session id line at all."""
+    req = request_factory()
+    store.save_request(req)
+
+    t1 = task_factory("implement", node_type="root_exec")
+    graph = graph_factory([t1], version=1)
+    store.save_graph_version(graph)
+    run = _make_run(graph_version_id=graph.id, request_id=req.id)
+    store.save_run(run)
+
+    attempt = _make_attempt(
+        attempt_id="att-1",
+        run_id=run.id,
+        task_id="implement",
+        graph_version_id=graph.id,
+        status=AttemptStatus.PASSED,
+        result_commit="result-sha",
+    )
+    store.save_attempt(attempt)
+
+    report = build_inspect_report(store, node_registry, run.id, "implement")
+
+    assert "sdk_session_id" not in report
 
 
 def test_build_inspect_report_task_id_result_file_strategy(

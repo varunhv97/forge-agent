@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Mapping
 from typing import Any, ClassVar, TypeVar, cast
 
 import pytest
-from claude_agent_sdk import HookMatcher
+from claude_agent_sdk import HookMatcher, ResultMessage
 from claude_agent_sdk.types import HookJSONOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput
 
 from forge.adapters.execution import sdk_execution_adapter
@@ -367,6 +367,67 @@ def test_chat_message_arriving_after_the_turn_finishes_is_never_forwarded(
     client = fake_cls.instances[-1]
     assert not any(call[0] == "query" for call in client.calls)
     assert result.messages == ["assistant: done"]
+
+
+def _result_message(session_id: str) -> ResultMessage:
+    """A minimal real `ResultMessage` — only the fields that dataclass
+    requires with no default, plus the one this feature actually reads."""
+    return ResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=90,
+        is_error=False,
+        num_turns=1,
+        session_id=session_id,
+    )
+
+
+def test_run_execution_attempt_returns_session_id_from_terminal_result_message(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The real session id a live Claude Code session gets (carried on the
+    turn's terminal `ResultMessage`) must make it all the way through
+    `run_execution_attempt`'s return value — this is what later lets a
+    person run `claude --resume <that id>` themselves.
+    """
+    result_message = _result_message("sess-abc-123")
+    fake_cls = _make_fake_client_class([["assistant: hello", result_message]])
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+        )
+    )
+
+    assert result.session_id == "sess-abc-123"
+    assert result.messages == ["assistant: hello", result_message]
+
+
+def test_run_execution_attempt_session_id_is_none_without_a_result_message(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    No `ResultMessage` in the drained messages (shouldn't normally happen)
+    must never raise — `session_id` is simply `None`.
+    """
+    fake_cls = _make_fake_client_class([["assistant: hello"]])
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+        )
+    )
+
+    assert result.session_id is None
 
 
 def test_chat_forwarding_failure_does_not_replace_the_receive_loops_own_result(

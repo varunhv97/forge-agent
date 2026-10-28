@@ -29,6 +29,21 @@ def test_successful_session_reports_completed():
     assert "2 message" in outcome.summary
 
 
+def test_session_id_is_threaded_through_to_the_outcome():
+    async def _fake_with_session_id(
+        *, prompt, profile, worktree_path, model, max_turns=None, chat_queue=None
+    ):
+        return ExecutionResult(messages=[object()], decisions=[], session_id="sess-xyz-789")
+
+    with patch(
+        "forge.adapters.execution.sdk_node_runner.run_execution_attempt",
+        side_effect=_fake_with_session_id,
+    ):
+        outcome = run_sdk_node("claude-sonnet-5", "do the thing", _profile(), "/tmp/wt")
+
+    assert outcome.session_id == "sess-xyz-789"
+
+
 def test_adapter_exception_reports_not_completed():
     async def _raising(**kwargs):
         raise RuntimeError("network exploded")

@@ -322,6 +322,11 @@ def _attempt_lines(attempt: Attempt, output_strategy: str | None) -> list[str]:
         lines.append(f"      failure: {attempt.failure_summary}")
     if attempt.requires_user_input:
         lines.append("      requires_user_input: True")
+    if attempt.sdk_session_id:
+        lines.append(
+            f"      sdk_session_id: {attempt.sdk_session_id} "
+            f"(resume with: claude --resume {attempt.sdk_session_id})"
+        )
     return lines
 
 

@@ -67,6 +67,14 @@ def _fails_outright(model, prompt, profile, worktree_path):
     return ExecutionRunOutcome(completed=False, summary="simulated adapter failure")
 
 
+def _writes_a_passing_test_with_session_id(model, prompt, profile, worktree_path):
+    """Same shape as `_writes_a_passing_test_without_committing`, but with a
+    real-looking Claude Agent SDK session id attached, the way `run_sdk_node`
+    reports one for a real session."""
+    Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
+    return ExecutionRunOutcome(completed=True, summary="wrote a test", session_id="sess-live-001")
+
+
 def test_implement_then_unit_verify_completes_end_to_end(store: Store, repo_root: Path):
     """
     The real worktree lifecycle, start to finish, with no mocking below the
@@ -136,6 +144,63 @@ def test_implement_then_unit_verify_completes_end_to_end(store: Store, repo_root
     assert len(evidence) == 1
     assert evidence[0].passed is True
     assert evidence[0].commit_sha == implement_attempt.result_commit
+
+
+def test_sdk_session_id_lands_on_the_execution_attempt_but_not_a_mechanical_one(
+    store: Store, repo_root: Path
+):
+    """
+    `ExecutionRunOutcome.session_id` must be threaded onto the Attempt row
+    `dispatch_execution_attempt` records — this is the capture-and-expose
+    feature's core plumbing. A MECHANICAL attempt (here, unit_verify_exec)
+    never goes through `dispatch_execution_attempt` at all, so it must keep
+    `sdk_session_id == None` — this is not a Claude Agent SDK concept for a
+    mechanical runner.
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+    model_registry = ModelRegistry([])
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=model_registry,
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_writes_a_passing_test_with_session_id,
+        repo_root=repo_root,
+    )
+
+    from tests.conftest import make_graph, make_request, make_task
+
+    criterion = AcceptanceCriterion(
+        id="c1", description="unit tests pass", verification_method="automated_test"
+    )
+    req = make_request(acceptance_criteria=[criterion])
+    t1 = make_task(
+        "t1",
+        node_type="implement_exec",
+        node_kind=NodeKind.EXECUTION,
+        permission_profile="code_edit_default",
+    )
+    t2 = make_task(
+        "t2",
+        node_type="unit_verify_exec",
+        node_kind=NodeKind.MECHANICAL,
+        depends_on=["t1"],
+        acceptance_criterion_ids=["c1"],
+        permission_profile="mechanical_default",
+    )
+    graph = make_graph([t1, t2])
+
+    run = start_run(req, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.COMPLETED_VERIFIED
+    attempts = {a.task_id: a for a in store.load_attempts(run.id)}
+    assert attempts["t1"].sdk_session_id == "sess-live-001"
+    assert attempts["t2"].sdk_session_id is None
 
 
 def test_implement_exec_with_no_changes_fails(store: Store, repo_root: Path):

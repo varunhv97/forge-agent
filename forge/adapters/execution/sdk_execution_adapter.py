@@ -12,6 +12,7 @@ from claude_agent_sdk import (
     HookContext,
     HookInput,
     HookMatcher,
+    ResultMessage,
 )
 from claude_agent_sdk.types import SyncHookJSONOutput
 
@@ -158,10 +159,29 @@ class ExecutionResult:
 
     messages: list[Any] = field(default_factory=list)
     decisions: list[DecisionLogEntry] = field(default_factory=list)
+    session_id: str | None = None
 
     @property
     def denied_calls(self) -> list[DecisionLogEntry]:
         return [entry for entry in self.decisions if not entry.decision.allowed]
+
+
+def _session_id_from_messages(messages: list[Any]) -> str | None:
+    """
+    Pulls the real Claude Agent SDK session id off the terminal
+    `ResultMessage` in a drained message list, if one is present.
+    `ResultMessage.session_id` is a typed field the SDK's `ResultMessage`
+    dataclass carries on every completed turn (confirmed from
+    `claude_agent_sdk.types`); searched from the end since a `ResultMessage`
+    is expected to be the last message of a turn, but nothing here assumes
+    exactly one is present — the first one found scanning backward is used,
+    and `None` is returned if the turn produced no `ResultMessage` at all
+    (shouldn't normally happen, but this must never raise for it).
+    """
+    for message in reversed(messages):
+        if isinstance(message, ResultMessage):
+            return message.session_id
+    return None
 
 
 # How often `_forward_chat_messages` polls the cross-thread `queue.Queue`
@@ -231,6 +251,13 @@ async def run_execution_attempt(
     changes when that event loop starts or stops relative to the
     scheduler's dispatch call.
 
+    The returned `ExecutionResult.session_id` is this session's real
+    Claude Agent SDK session id, pulled from the terminal `ResultMessage`
+    in `messages` by `_session_id_from_messages` (`None` if no
+    `ResultMessage` was ever produced). Forge only captures and persists
+    this value for later use with `claude --resume <session_id>` run by a
+    person themselves — nothing here acts on it.
+
     When `chat_queue` is given, `_forward_chat_messages` runs concurrently
     with the receive loop (two tasks, one event loop) and calls
     `client.query()` on this same client for every message that arrives on
@@ -297,4 +324,8 @@ async def run_execution_attempt(
                     pass
     finally:
         await client.disconnect()
-    return ExecutionResult(messages=messages, decisions=decision_log)
+    return ExecutionResult(
+        messages=messages,
+        decisions=decision_log,
+        session_id=_session_id_from_messages(messages),
+    )

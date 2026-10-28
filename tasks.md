@@ -593,6 +593,69 @@ Commit messages hold the full history; this file is a short index.
         clean both times; `black`/`ruff`/`mypy --strict` all clean on
         `forge/`, `scripts/`, `tests/`.
 
+- [x] **Post-M9: capture and expose the Claude Agent SDK session id.**
+      A small, separate addition on top of M9 (not part of it), scoped
+      explicitly to capture-and-expose only. Every EXECUTION attempt
+      dispatched through the Claude Agent SDK gets a real session, with
+      its own `session_id` carried on the terminal `ResultMessage`. Forge
+      now captures it and persists it on the `Attempt`:
+      - `ExecutionRunOutcome` (`forge/controller/execution_registry.py`)
+        gained `session_id: str | None = None`.
+      - `sdk_execution_adapter.run_execution_attempt`'s `ExecutionResult`
+        gained the same field, filled by a new `_session_id_from_messages`
+        helper that scans the already-collected `messages` list for a
+        `ResultMessage` (imported from `claude_agent_sdk`) and reads its
+        `session_id` — `None`, never a raised error, if no `ResultMessage`
+        is present. `sdk_node_runner.run_sdk_node` threads it straight
+        into the `ExecutionRunOutcome` it returns.
+      - `Attempt` (`forge/models/attempt.py`) gained
+        `sdk_session_id: str | None = None`; `scheduler.
+        dispatch_execution_attempt` sets it from the outcome right after
+        every EXECUTION attempt (retries included, since retries also go
+        through this same function). Always `None` for a MECHANICAL
+        attempt (`deploy_exec` etc. never call this path at all) and for
+        a Codex CLI attempt (explicitly out of scope for this feature).
+      - `forge/cli.py` needed no new dataclass field at all:
+        `TaskStatusInfo.latest_attempt`/`RunInspection.attempts` already
+        carry the full `Attempt`, so `sdk_session_id` was already in
+        scope everywhere `compute_run_inspection` is read. Only
+        `_attempt_lines` (used by `build_inspect_report`'s per-task
+        detail, behind `forge inspect <run_id> <task_id>`) changed, to
+        print `sdk_session_id: <value> (resume with: claude --resume
+        <value>)` when one is present — nothing printed otherwise.
+      - Checked whether the TUI would show this for free: it doesn't.
+        `LiveRunScreen`'s task table only has TASK/NODE TYPE/STATUS/
+        ATTEMPT columns, and `RunSummaryScreen` calls
+        `build_inspect_report` with no `task_id` (the run-level report,
+        which never descends into per-attempt detail) — neither renders
+        a single task's attempt detail today. Showing the session id in
+        the TUI would need real new UI (a column, or a per-task detail
+        view) and was left undone, per this task's own explicit scope.
+      - **Deliberately not done, a separate not-yet-decided feature:**
+        automatically passing `resume=<sdk_session_id>` into a retry's
+        `ClaudeAgentOptions` — no retry/resume policy changed at all.
+        Forge only persists and displays the value; a person decides
+        whether and how to use it themselves, via `claude --resume
+        <sdk_session_id>` in their own terminal.
+      - Tests: extended the fake `ClaudeSDKClient` double in
+        `tests/adapters/execution/test_sdk_execution_adapter.py` (no
+        second fake built) to yield a real `ResultMessage` with a
+        `session_id`, proving it survives to `run_execution_attempt`'s
+        return value, and that no `ResultMessage` at all means `None`
+        rather than a raised error.
+        `tests/adapters/execution/test_sdk_node_runner.py` gained
+        coverage that the id is threaded through to
+        `ExecutionRunOutcome`. `tests/controller/test_execution_dispatch.py`
+        gained an end-to-end `run_to_completion` test (a real worktree,
+        `implement_exec` + `unit_verify_exec`) proving the id lands on
+        the EXECUTION attempt and stays `None` on the MECHANICAL one.
+        `tests/cli/test_cli.py` gained two `build_inspect_report` tests —
+        present-and-formatted-for-copy-paste, and silently absent when
+        there isn't one. Full suite (`pytest`, 318 tests) run twice,
+        clean both times; `black`/`ruff`/`mypy` (strict, via the
+        project's own `files = ["forge", "scripts", "tests"]` config)
+        all clean.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps
