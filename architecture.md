@@ -117,17 +117,35 @@ forge/
                   custom_dag.py — build_custom_dag_request_and_graph loads
                   a `.forge/dags/*.json` template (Mode.CUSTOM,
                   Request.template_name names which one), validates every
-                  task's node_type/permission_profile against the real
-                  registries (CustomDagError names the file and bad value
-                  on failure), substitutes `{{ input }}` placeholders, and
-                  hands back the same kind of draft for the caller to run
-                  through compile_and_validate — never touches
-                  deploy_authorized/Budgets itself, both are caller-supplied.
-                  resolve_permission_profile (not underscore-prefixed, on
-                  purpose) is reused directly by the TUI's DAG builder
-                  (forge/tui/dag_builder_screen.py) to validate a task's
-                  permission_profile override at template-save time — the
-                  same lookup/defaulting logic, not a second copy of it
+                  task's node_type/permission_profile/model against the
+                  real registries (CustomDagError names the file and bad
+                  value on failure), substitutes `{{ input }}`
+                  placeholders, and hands back the same kind of draft for
+                  the caller to run through compile_and_validate — never
+                  touches deploy_authorized/Budgets itself, both are
+                  caller-supplied. DagTaskSpec's per-task fields:
+                  node_type/description/depends_on/acceptance_criterion_ids
+                  are required; permission_profile/model/effort are each
+                  optional overrides, None by default. permission_profile
+                  defaults to the node type's own NodeType.
+                  permission_profile (resolve_permission_profile — not
+                  underscore-prefixed, on purpose, since it's reused
+                  directly by the TUI's DAG builder,
+                  forge/tui/dag_builder_screen.py, to validate the same
+                  override at template-save time). model, when given, is
+                  checked by resolve_model_override against the real
+                  ModelRegistry.validate_eligible (same CustomDagError
+                  convention) and carried onto TaskSpec.model_override;
+                  effort is carried onto TaskSpec.effort_override with no
+                  extra registry check (its own EffortLevel Literal type
+                  already constrains it at parse time). Both overrides are
+                  None (no override, identical to pre-phase-2 behavior)
+                  whenever the task's JSON omits them — see "Model and
+                  effort selection, concretely" below for how
+                  dispatch_execution_attempt actually consumes them.
+                  build_custom_dag_request_and_graph takes a
+                  model_registry: ModelRegistry parameter for this
+                  validation only — selection stays dispatch-time.
   adapters/
     execution/    sdk_execution_adapter.py — wires forge/isolation/hooks.py
                   into real claude_agent_sdk types (ClaudeAgentOptions,
@@ -499,6 +517,47 @@ called anywhere live — model selection for a fresh attempt still falls
 back to `node_type.default_model` directly, and a retry/escalation's model
 comes from the decision proposal, not `select_model` — this predates the
 effort work and is unchanged by it.
+
+**Task-level model/effort overrides (phase 2 of 4).** `TaskSpec`
+(`forge/models/graph.py`) carries two optional fields a custom DAG's JSON
+can set per task — `model_override: str | None` and `effort_override:
+EffortLevel | None` — both `None` by default, identical to pre-phase-2
+behavior. `forge/modes/custom_dag.py`'s `DagTaskSpec` exposes the JSON-facing
+names (`model`, `effort`); a `model` override is validated at load time
+against the real `ModelRegistry.validate_eligible` by the new
+`resolve_model_override` (same shape, same `CustomDagError` convention, as
+`resolve_permission_profile`'s existing `permission_profile` validation);
+`effort` needs no equivalent check, since it's already constrained to a
+real `EffortLevel` by its own `Literal` type the moment the file is
+parsed. `build_custom_dag_request_and_graph` takes a `model_registry:
+ModelRegistry` parameter for this purpose only — model/effort *selection*
+stays entirely dispatch-time, this function only validates.
+
+In `dispatch_execution_attempt` (`scheduler.py`):
+- **Model**: `model = model_used or task.model_override or
+  node_type.default_model` — the task-level override slots directly into
+  the existing override-or-default expression, below a decision-driven
+  retry/escalation's explicit `model_used` (a later, more specific
+  instruction) and above the node type's own default. There is no
+  escalation interaction to decide here, since a fresh dispatch's model
+  never goes through `select_model`'s escalation policy at all regardless
+  of any override (the pre-existing gap described two paragraphs up) —
+  `model_override` works around that gap the same way everything else
+  already does, it doesn't fix it.
+- **Effort**: a task-level `effort_override` replaces only
+  `node_type.default_effort`'s rung, never `escalation_effort`.
+  `_effort_aware_node_type(task, node_type)` returns `node_type` unchanged
+  with no override, or a transient `node_type.model_copy(update=
+  {"default_effort": task.effort_override})` with one (`node_type` itself
+  is never mutated); `select_effort` then runs its real failure-count
+  policy against *that*, so `node_type.escalation_effort` still applies
+  after 2+ prior `FAILED` attempts. This was a deliberate choice between
+  two options — replace only the first rung (chosen) vs. an override that
+  fixes effort permanently and disables escalation — made because a task
+  author overriding the *starting* effort shouldn't also disable the
+  safety net that exists precisely to recover from a starting point that
+  turns out to be too weak; an override is a better first guess, not a
+  promise that no failure will ever need more.
 
 ## EXECUTION dispatch, concretely
 

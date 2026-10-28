@@ -30,6 +30,7 @@ from textual.binding import Binding, BindingType
 
 from forge import project
 from forge.controller import db
+from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import start_run
 from forge.controller.store import NotFoundError, Store
@@ -116,6 +117,16 @@ class ForgeApp(App[None]):
         self.node_registry = NodeTypeRegistry()
         self.permission_registry = PermissionProfileRegistry()
         register_all(self.node_registry, self.permission_registry)
+        # Empty, same as every other live caller (scripts/forge_cli.py,
+        # forge/tui/runner.py) — no real ModelCapability entries are
+        # registered anywhere in live Forge yet (see architecture.md's
+        # model/effort section), so a custom DAG task that declares a
+        # `model` override will currently always fail resolve_model_
+        # override's eligibility check until that's populated for real.
+        # Needed here purely to validate such an override at
+        # build_custom_dag_request_and_graph time, same as
+        # self.permission_registry already is for permission_profile.
+        self.model_registry = ModelRegistry([])
         self._live_workers: dict[str, RunWorker] = {}
 
     @property
@@ -203,6 +214,7 @@ class ForgeApp(App[None]):
                 values,
                 self.node_registry,
                 self.permission_registry,
+                self.model_registry,
                 _DEFAULT_RUN_BUDGETS,
                 deploy_authorized=True,
             )

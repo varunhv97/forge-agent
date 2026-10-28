@@ -34,13 +34,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 
+from forge.controller.model_registry import ModelNotEligibleError, ModelRegistry, UnknownModelError
 from forge.controller.node_registry import (
     NodeTypeRegistry,
     PermissionProfileRegistry,
     UnknownNodeTypeError,
     UnknownPermissionProfileError,
 )
-from forge.models.common import Mode
+from forge.models.common import EffortLevel, Mode
 from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec
 from forge.models.permissions import Budgets
 from forge.models.request import AcceptanceCriterion, Request
@@ -86,6 +87,18 @@ class DagTaskSpec(BaseModel):
     # a task.
     permission_profile: str | None = None
     required: bool = True
+    # Optional per-task overrides (phase 2 of the model/effort
+    # customization arc — see architecture.md). Both None by default,
+    # meaning "no override," identical to today's behavior. model, when
+    # given, is validated against the real ModelRegistry's eligibility
+    # check for this task's node_type — see resolve_model_override.
+    # effort is structurally validated by its own Literal type (same
+    # EffortLevel Forge's node types already use) the moment this file is
+    # parsed into a DagTaskSpec; no further registry check is needed or
+    # performed for it. See TaskSpec.model_override/effort_override for
+    # how each one actually reaches dispatch.
+    model: str | None = None
+    effort: EffortLevel | None = None
 
 
 class DagDefinition(BaseModel):
@@ -217,11 +230,44 @@ def resolve_permission_profile(
     return profile_name
 
 
+def resolve_model_override(
+    task: DagTaskSpec,
+    node_type_name: str,
+    model_registry: ModelRegistry,
+    *,
+    file_path: Path,
+) -> str | None:
+    """
+    None means "no override" — TaskSpec.model_override stays unset and
+    dispatch_execution_attempt falls back to the node type's own
+    default_model exactly as before this field existed. When `task.model`
+    is given, it's checked against the real ModelRegistry's eligibility
+    rule (the same check an ESCALATE_MODEL decision proposal's
+    escalate_to_model already goes through in apply_decision) — a model
+    that doesn't exist at all, or exists but isn't eligible for this task's
+    node_type, raises a CustomDagError naming the file, the task, and the
+    bad value, same as an unknown node_type/permission_profile does,
+    rather than surfacing as a bare UnknownModelError/ModelNotEligibleError
+    deep inside dispatch.
+    """
+    if task.model is None:
+        return None
+    try:
+        model_registry.validate_eligible(task.model, node_type_name)
+    except (UnknownModelError, ModelNotEligibleError) as exc:
+        raise CustomDagError(
+            f"{file_path}: task '{task.id}' references unknown or ineligible model "
+            f"'{task.model}' for node_type '{node_type_name}': {exc}"
+        ) from exc
+    return task.model
+
+
 def build_custom_dag_request_and_graph(
     file_path: Path,
     input_values: dict[str, str],
     node_registry: NodeTypeRegistry,
     permission_registry: PermissionProfileRegistry,
+    model_registry: ModelRegistry,
     budgets: Budgets,
     *,
     deploy_authorized: bool = False,
@@ -239,6 +285,11 @@ def build_custom_dag_request_and_graph(
     never prompts for anything itself) and is used to substitute every
     `{{ input_name }}` placeholder found in a task's or acceptance
     criterion's `description`.
+
+    `model_registry` is used only to validate a task's optional `model`
+    override (see resolve_model_override) — this function never calls
+    select_model/select_effort itself, both are purely dispatch-time
+    (forge/controller/scheduler.py).
 
     `budgets` and `deploy_authorized` are taken exactly as given — this
     module never invents a default for either, since both are run-time,
@@ -264,6 +315,12 @@ def build_custom_dag_request_and_graph(
             permission_registry,
             file_path=file_path,
         )
+        model_override = resolve_model_override(
+            dag_task,
+            dag_task.node_type,
+            model_registry,
+            file_path=file_path,
+        )
         description = _substitute(dag_task.description, input_values, file_path=file_path)
 
         tasks.append(
@@ -276,6 +333,8 @@ def build_custom_dag_request_and_graph(
                 acceptance_criterion_ids=list(dag_task.acceptance_criterion_ids),
                 permission_profile=permission_profile,
                 required=dag_task.required,
+                model_override=model_override,
+                effort_override=dag_task.effort,
             )
         )
         edges.extend(

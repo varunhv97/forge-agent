@@ -433,6 +433,28 @@ def _read_result_file(
     return passed, summary, output_dict
 
 
+def _effort_aware_node_type(task: TaskSpec, node_type: NodeType) -> NodeType:
+    """
+    Returns node_type unchanged when the task sets no effort_override.
+    Otherwise returns a transient copy (node_type itself is never mutated)
+    with only default_effort replaced by the override — select_effort then
+    runs its real escalation policy on top of that, so node_type's own
+    escalation_effort still applies after repeated failures.
+
+    This is the design decision this feature made explicit, not the only
+    possible one: the alternative would be an override that fixes effort
+    permanently and disables escalation entirely. Replacing only the
+    starting rung was chosen because a task author overriding the
+    *starting* effort shouldn't also disable the safety net that exists
+    precisely to recover from a starting point that turns out to be too
+    weak — see architecture.md's model/effort section for the full
+    reasoning.
+    """
+    if task.effort_override is None:
+        return node_type
+    return node_type.model_copy(update={"default_effort": task.effort_override})
+
+
 def dispatch_execution_attempt(
     task: TaskSpec,
     run: Run,
@@ -464,7 +486,15 @@ def dispatch_execution_attempt(
     node_type = node_registry.get(task.node_type)
     profile = permission_registry.get(task.permission_profile)
     handlers = execution_handler_registry.get(task.node_type)
-    model = model_used or node_type.default_model
+    # model_used (a decision-driven retry/escalation's explicit choice)
+    # always wins when present; otherwise a task-level override (validated
+    # at custom-DAG-build time against the real ModelRegistry) wins over
+    # the node type's own default_model — the same "override-or-default"
+    # shape task.permission_profile already uses relative to node_type.
+    # permission_profile. This is still the one fresh-dispatch model
+    # decision that never goes through select_model's escalation policy at
+    # all — a pre-existing gap (see architecture.md), unchanged here.
+    model = model_used or task.model_override or node_type.default_model
     if model is None:
         raise ValueError(f"no model configured for node type '{task.node_type}'")
 
@@ -502,8 +532,10 @@ def dispatch_execution_attempt(
     # dispatch (initial attempt or a decision-driven retry/escalation) from
     # this task's own attempt history — None whenever node_type configures
     # no default_effort at all, which every runner treats as "don't
-    # override effort for this call."
-    effort = select_effort(task.id, node_type, attempts)
+    # override effort for this call." See _effort_aware_node_type for how a
+    # task-level effort_override folds into this without disabling
+    # escalation.
+    effort = select_effort(task.id, _effort_aware_node_type(task, node_type), attempts)
     outcome = execution_runner(model, prompt, profile, worktree.worktree_path, effort=effort)
 
     passed = False

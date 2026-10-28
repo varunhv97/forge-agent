@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from forge.controller.node_registry import NodeType, NodeTypeRegistry, PermissionProfileRegistry
-from forge.models.common import NodeKind
+from forge.models.common import EffortLevel, NodeKind
 from forge.models.graph import EdgeSpec, GraphVersion, TaskSpec
 from forge.models.permissions import Budgets, PermissionProfile
 from forge.models.request import AcceptanceCriterion, Request
@@ -96,6 +96,8 @@ def make_task(
     acceptance_criterion_ids: list[str] | None = None,
     permission_profile: str = "default",
     required: bool = True,
+    model_override: str | None = None,
+    effort_override: EffortLevel | None = None,
 ) -> TaskSpec:
     return TaskSpec(
         id=task_id,
@@ -106,6 +108,8 @@ def make_task(
         acceptance_criterion_ids=acceptance_criterion_ids or [],
         permission_profile=permission_profile,
         required=required,
+        model_override=model_override,
+        effort_override=effort_override,
     )
 
 

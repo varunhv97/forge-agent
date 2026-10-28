@@ -925,6 +925,110 @@ Commit messages hold the full history; this file is a short index.
         the next phase); the TUI's trace display; any interrupt/resume
         mechanism.
 
+- [x] **Post-M9: effort-level customization, phase 2 of 4 (custom-DAG
+      per-task model/effort overrides).** Lets a `.forge/dags/*.json`
+      task override which model/effort it uses, following the exact
+      `permission_profile`-override shape `forge/modes/custom_dag.py`
+      already has: optional, validated at load time, defaulting to the
+      node type's own behavior when omitted.
+      - A real pre-existing gap phase 1 surfaced, confirmed again here and
+        deliberately left alone (not this phase's job): a *fresh*
+        EXECUTION dispatch's model never goes through `select_model`'s
+        escalation policy at all — `scheduler.py` uses
+        `model_used or task.model_override or node_type.default_model`
+        directly. `select_effort`, by contrast, runs its real
+        escalation-by-failure-count check on every dispatch. This
+        asymmetry shaped the two overrides differently, below.
+      - Example task entry with both overrides:
+        ```json
+        {
+          "id": "implement",
+          "node_type": "implement_exec",
+          "description": "{{ objective }}",
+          "model": "claude-opus-5",
+          "effort": "low"
+        }
+        ```
+        Both fields are optional; omitting either (or both) leaves
+        `TaskSpec.model_override`/`effort_override` at `None`, identical
+        to pre-phase-2 behavior.
+      - `TaskSpec` (`forge/models/graph.py`) gained `model_override: str |
+        None = None` and `effort_override: EffortLevel | None = None` —
+        the carrier from graph-build time through to the scheduler, since
+        `select_model`/`select_effort` only ever look at `NodeType`, never
+        at a specific `TaskSpec` instance. `compile_and_validate`
+        (`forge/controller/validator.py`) needed no change at all: it has
+        no existing check on `default_model`/`escalation_model` either
+        (model/effort were never part of its invariant set), `model_override`
+        is already validated once at custom-DAG load time, and
+        `effort_override` is structurally validated for free by its own
+        `EffortLevel` `Literal` type the moment Pydantic constructs the
+        `TaskSpec` — nothing left for the generic graph validator to check.
+      - `forge/modes/custom_dag.py`: `DagTaskSpec` gained the same two
+        optional fields (`model: str | None`, `effort: EffortLevel |
+        None`), read straight off the JSON. A new `resolve_model_override`
+        (same un-underscored, reusable-elsewhere shape as
+        `resolve_permission_profile`) validates a given `model` against
+        the real `ModelRegistry.validate_eligible` — unknown model or one
+        not eligible for this task's `node_type` raises `CustomDagError`
+        naming the file, task id, and bad value, same as an unknown
+        `node_type`/`permission_profile` already does. `effort` needs no
+        equivalent registry check — it's already constrained to a real
+        `EffortLevel` by its own type the moment the file is parsed.
+        `build_custom_dag_request_and_graph` gained a new required
+        `model_registry: ModelRegistry` parameter (used only for this
+        validation; model/effort *selection* stays entirely
+        dispatch-time) — every call site updated (`forge/tui/app.py`,
+        `scripts/forge_cli.py`, and every test that calls it).
+      - **The escalation-interaction design decision this phase had to
+        make explicit:** does a task-level `effort` override replace only
+        the first rung (`default_effort`'s slot), with the node type's own
+        `escalation_effort` still kicking in after repeated failures? Or
+        does it fix effort permanently, disabling escalation entirely?
+        Chose the former. `scheduler.py` gained `_effort_aware_node_type`:
+        with no override, returns `node_type` unchanged; with one, returns
+        a transient `node_type.model_copy(update={"default_effort":
+        task.effort_override})` (`node_type` itself is never mutated) —
+        `select_effort` then runs its real policy against *that*, so
+        `escalation_effort` is completely untouched. Reasoning: a task
+        author overriding the *starting* effort shouldn't also disable the
+        safety net that exists precisely to recover from a starting point
+        that turns out to be too weak — an override is a better first
+        guess, not a promise that no failure will ever need more. Model
+        has no equivalent interaction to decide, since a fresh dispatch's
+        model never escalates at all today (the gap above) —
+        `model_override` just slots into the existing
+        `override-or-default` expression, with a decision-driven retry/
+        escalation's explicit `model_used` still taking priority over it
+        (unchanged: that's a later, more specific instruction than either
+        the task's own override or the node type's default).
+      - Tests: `tests/modes/test_custom_dag.py` gained
+        `test_task_omitting_model_and_effort_leaves_both_overrides_unset`
+        (no regression), `test_task_level_model_and_effort_overrides_land_
+        on_the_task_spec`, `test_unknown_model_override_raises_specific_
+        error_naming_file_and_value`, and `test_model_override_ineligible_
+        for_this_node_type_raises_specific_error`. `tests/controller/
+        test_execution_dispatch.py` gained
+        `test_custom_dag_task_level_model_and_effort_overrides_reach_the_
+        execution_runner` (a real custom-DAG JSON file, loaded, compiled,
+        and run through the real scheduler with a capturing
+        `execution_runner` — not just a Pydantic round-trip) and
+        `test_effort_override_replaces_only_the_default_rung_escalation_
+        still_applies` (the chosen interaction rule, proven end to end: a
+        task overriding `implement_exec`'s effort to `"low"` runs its
+        first two attempts at `"low"`, not `implement_exec`'s own
+        `"high"`, and its third — after 2 prior `FAILED` attempts —
+        escalates to `implement_exec`'s own `escalation_effort`
+        (`"max"`), never back to `"low"` and never a value the override
+        invented). Full suite (`pytest`, 342 tests) run twice, clean both
+        times; `black`/`ruff`/`mypy` (strict) all clean.
+      - **Not done, explicitly out of scope for this phase:** the Codex
+        adapter; the TUI's trace display (next phase); any interrupt/
+        resume mechanism (phase 4); fixing the pre-existing
+        fresh-dispatch model-escalation gap noted above — this phase works
+        around it consistently (`model_override` slots into the same
+        `override-or-default` expression), it doesn't fix it.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps

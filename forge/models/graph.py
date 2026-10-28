@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from forge.models.common import NodeKind
+from forge.models.common import EffortLevel, NodeKind
 
 
 class TaskSpec(BaseModel):
@@ -17,6 +17,21 @@ class TaskSpec(BaseModel):
     acceptance_criterion_ids: list[str] = []
     permission_profile: str
     required: bool = True  # required=True tasks gate completion
+    # Optional per-task overrides a custom DAG's JSON can declare (see
+    # forge/modes/custom_dag.py's DagTaskSpec.model/effort) — None means
+    # "no override," the exact pre-existing behavior. model_override, when
+    # set, is validated at custom-DAG-build time against the real
+    # ModelRegistry's eligibility check (CustomDagError on a bad value,
+    # never trusted raw by the scheduler); dispatch_execution_attempt reads
+    # it as `model_used or model_override or node_type.default_model` — it
+    # only ever wins over the node type's own default, never over a
+    # decision-driven retry/escalation's explicit model_used. effort_override
+    # replaces only the node type's own default_effort rung for
+    # select_effort's escalation policy; escalation_effort still applies
+    # after repeated failures — see scheduler.dispatch_execution_attempt and
+    # architecture.md for the reasoning behind not disabling escalation.
+    model_override: str | None = None
+    effort_override: EffortLevel | None = None
 
 
 class EdgeSpec(BaseModel):

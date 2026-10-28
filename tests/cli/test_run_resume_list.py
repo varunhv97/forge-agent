@@ -10,6 +10,7 @@ import scripts.forge_cli as forge_cli
 from forge import project
 from forge.controller import db
 from forge.controller.execution_registry import ExecutionRunOutcome
+from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import start_run
 from forge.controller.store import Store
@@ -197,6 +198,7 @@ def test_resume_drives_a_stalled_run_to_completion(
         {"objective": "build a tiny thing"},
         node_registry,
         permission_registry,
+        ModelRegistry([]),
         Budgets(max_cost_usd=5.0, max_wall_seconds=900),
     )
     graph = compile_and_validate(draft, request, node_registry, permission_registry)

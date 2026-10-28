@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -11,10 +12,14 @@ from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import ControllerDependencies, run_to_completion, start_run
 from forge.controller.store import Store
+from forge.controller.validator import compile_and_validate
 from forge.models.attempt import AttemptStatus
 from forge.models.common import NodeKind
+from forge.models.model_registry import ModelCapability
+from forge.models.permissions import Budgets
 from forge.models.request import AcceptanceCriterion
 from forge.models.run import RunStatus
+from forge.modes.custom_dag import build_custom_dag_request_and_graph
 from forge.nodes import register_all
 
 
@@ -345,3 +350,154 @@ def test_execution_runner_failure_is_recorded_as_failed_attempt(store: Store, re
     assert attempt.status == AttemptStatus.FAILED
     assert attempt.failure_summary is not None
     assert "simulated adapter failure" in attempt.failure_summary
+
+
+# -- task-level model/effort overrides (phase 2 of the model/effort --------
+# -- customization arc) -----------------------------------------------------
+
+_OVERRIDE_DAG_DEFINITION = {
+    "schema_version": 1,
+    "name": "override-test",
+    "description": "a single implement_exec task with model/effort overrides",
+    "inputs": [],
+    "acceptance_criteria": [],
+    "tasks": [
+        {
+            "id": "implement",
+            "node_type": "implement_exec",
+            "description": "do the thing",
+            "depends_on": [],
+            "acceptance_criterion_ids": [],
+            "model": "claude-opus-5",
+            "effort": "low",
+        }
+    ],
+}
+
+
+def test_custom_dag_task_level_model_and_effort_overrides_reach_the_execution_runner(
+    store: Store, repo_root: Path, tmp_path: Path
+):
+    """
+    Not just a Pydantic round-trip: a real custom-DAG JSON file, loaded
+    through build_custom_dag_request_and_graph, compiled, and run through
+    the real scheduler with a capturing execution_runner — proving the
+    task's `model`/`effort` overrides actually reach the runner on a fresh
+    dispatch, in place of implement_exec's own registered default_model
+    ("claude-sonnet-5") and default_effort ("high").
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+    model_registry = ModelRegistry(
+        [
+            ModelCapability(
+                provider="anthropic",
+                model_id="claude-opus-5",
+                adapter_kind="sdk_execution",
+                supports_tools=True,
+                context_window=200000,
+                cost_per_mtok_in=15.0,
+                cost_per_mtok_out=75.0,
+                eligible_roles=["implement_exec"],
+            )
+        ]
+    )
+
+    dag_path = tmp_path / "override-test.json"
+    dag_path.write_text(json.dumps(_OVERRIDE_DAG_DEFINITION))
+
+    request, draft = build_custom_dag_request_and_graph(
+        dag_path,
+        {},
+        node_registry,
+        permission_registry,
+        model_registry,
+        Budgets(max_cost_usd=5.0, max_wall_seconds=900),
+    )
+    graph = compile_and_validate(draft, request, node_registry, permission_registry)
+
+    calls: list[tuple[str, object]] = []
+
+    def _capturing_runner(model, prompt, profile, worktree_path, *, effort=None):
+        calls.append((model, effort))
+        return _writes_a_passing_test_without_committing(
+            model, prompt, profile, worktree_path, effort=effort
+        )
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=model_registry,
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_capturing_runner,
+        repo_root=repo_root,
+    )
+
+    run = start_run(request, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.COMPLETED_VERIFIED
+    assert calls == [("claude-opus-5", "low")]
+
+    attempt = store.load_attempts(run.id)[0]
+    assert attempt.model_used == "claude-opus-5"
+
+
+def test_effort_override_replaces_only_the_default_rung_escalation_still_applies(
+    store: Store, repo_root: Path
+):
+    """
+    The design decision this phase made explicit (see architecture.md):
+    a task-level effort_override replaces only node_type.default_effort's
+    rung in select_effort's policy — node_type.escalation_effort still
+    applies after repeated failures, rather than the override disabling
+    escalation outright. implement_exec is registered with
+    default_effort="high"/escalation_effort="max"; this task overrides
+    only the starting point to "low". The first two attempts (0 and 1
+    prior FAILED attempts, below ESCALATION_FAILURE_THRESHOLD) must both
+    run at the override's "low", not implement_exec's own "high"; the
+    third (2 prior FAILED attempts) must escalate to "max" — the node
+    type's own escalation_effort, never "low" again and never a value the
+    override invented.
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+    efforts_seen: list[object] = []
+
+    def _fails_twice_then_passes(model, prompt, profile, worktree_path, *, effort=None):
+        efforts_seen.append(effort)
+        if len(efforts_seen) < 3:
+            return ExecutionRunOutcome(completed=False, summary="simulated failure")
+        Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
+        return ExecutionRunOutcome(completed=True, summary="wrote a test")
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=ModelRegistry([]),
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_fails_twice_then_passes,
+        repo_root=repo_root,
+    )
+
+    from tests.conftest import make_graph, make_request, make_task
+
+    req = make_request()
+    t1 = make_task(
+        "t1",
+        node_type="implement_exec",
+        node_kind=NodeKind.EXECUTION,
+        permission_profile="code_edit_default",
+        effort_override="low",
+    )
+    graph = make_graph([t1])
+
+    run = start_run(req, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.COMPLETED_VERIFIED
+    assert efforts_seen == ["low", "low", "max"]

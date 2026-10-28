@@ -208,6 +208,7 @@ async def test_building_and_saving_a_branching_template_round_trips(
             {"objective": "a tiny test feature"},
             app.node_registry,
             app.permission_registry,
+            app.model_registry,
             Budgets(max_cost_usd=1.0, max_wall_seconds=60),
             deploy_authorized=False,
         )

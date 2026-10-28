@@ -216,6 +216,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
         _build_registries()
     )
+    # Empty, same as every other live caller — no real ModelCapability
+    # entries are registered anywhere in live Forge yet (see
+    # architecture.md's model/effort section). Shared between the
+    # custom-DAG build-time validation below and ControllerDependencies,
+    # rather than constructing two separate empty instances.
+    model_registry = ModelRegistry([])
 
     if args.mode == "feature-blast":
         if not args.journey:
@@ -240,6 +246,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 input_values,
                 node_registry,
                 permission_registry,
+                model_registry,
                 DEFAULT_RUN_BUDGETS,
                 deploy_authorized=args.deploy_authorized,
             )
@@ -260,7 +267,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             mechanical_registry=mechanical_registry,
             node_registry=node_registry,
             permission_registry=permission_registry,
-            model_registry=ModelRegistry([]),
+            model_registry=model_registry,
             execution_handler_registry=execution_handler_registry,
             execution_runner=run_sdk_node,
             repo_root=repo_root,

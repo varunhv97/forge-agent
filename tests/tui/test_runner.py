@@ -18,6 +18,7 @@ import pytest
 
 from forge.controller import db
 from forge.controller.execution_registry import ExecutionRunOutcome
+from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import start_run
 from forge.controller.store import Store
@@ -48,6 +49,7 @@ def _start_stalled_run(git_repo: Path) -> tuple[Path, str]:
         {"objective": "build a tiny thing"},
         node_registry,
         permission_registry,
+        ModelRegistry([]),
         Budgets(max_cost_usd=5.0, max_wall_seconds=900),
         deploy_authorized=True,
     )
