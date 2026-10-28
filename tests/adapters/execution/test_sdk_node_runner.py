@@ -13,7 +13,15 @@ def _profile() -> PermissionProfile:
 
 
 async def _fake_run_execution_attempt(
-    *, prompt, profile, worktree_path, model, max_turns=None, chat_queue=None, effort=None
+    *,
+    prompt,
+    profile,
+    worktree_path,
+    model,
+    max_turns=None,
+    chat_queue=None,
+    effort=None,
+    live_messages=None,
 ):
     return ExecutionResult(messages=[object(), object()], decisions=[])
 
@@ -31,7 +39,15 @@ def test_successful_session_reports_completed():
 
 def test_session_id_is_threaded_through_to_the_outcome():
     async def _fake_with_session_id(
-        *, prompt, profile, worktree_path, model, max_turns=None, chat_queue=None, effort=None
+        *,
+        prompt,
+        profile,
+        worktree_path,
+        model,
+        max_turns=None,
+        chat_queue=None,
+        effort=None,
+        live_messages=None,
     ):
         return ExecutionResult(messages=[object()], decisions=[], session_id="sess-xyz-789")
 
@@ -123,3 +139,42 @@ def test_effort_is_forwarded_through_to_run_execution_attempt():
         run_sdk_node("claude-sonnet-5", "do the thing", _profile(), "/tmp/wt", effort="high")
 
     assert captured["effort"] == "high"
+
+
+def test_no_live_messages_defaults_to_none_on_run_execution_attempt():
+    captured: dict[str, object] = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return ExecutionResult(messages=[], decisions=[])
+
+    with patch(
+        "forge.adapters.execution.sdk_node_runner.run_execution_attempt",
+        side_effect=_capture,
+    ):
+        run_sdk_node("claude-sonnet-5", "do the thing", _profile(), "/tmp/wt")
+
+    assert captured["live_messages"] is None
+
+
+def test_live_messages_is_forwarded_through_to_run_execution_attempt():
+    captured: dict[str, object] = {}
+
+    async def _capture(**kwargs):
+        captured.update(kwargs)
+        return ExecutionResult(messages=[], decisions=[])
+
+    live_messages: queue.Queue[object] = queue.Queue()
+    with patch(
+        "forge.adapters.execution.sdk_node_runner.run_execution_attempt",
+        side_effect=_capture,
+    ):
+        run_sdk_node(
+            "claude-sonnet-5",
+            "do the thing",
+            _profile(),
+            "/tmp/wt",
+            live_messages=live_messages,
+        )
+
+    assert captured["live_messages"] is live_messages

@@ -143,16 +143,18 @@ def fake_execution_runner(
     *,
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
+    live_messages: queue.Queue[object] | None = None,
 ) -> ExecutionRunOutcome:
     """
     Stands in for a real `claude` CLI session, the same way
     tests/cli/test_run_resume_list.py's fake does: writes real work into
     the worktree so the mechanical auto-commit safety net has something to
     commit, without ever touching a real LLM or network. Accepts (and
-    ignores) `chat_queue`/`effort` purely to match `run_sdk_node`'s real
-    keyword-only signature — `RunWorker` always calls its configured
-    execution runner with both keywords now (see `forge/tui/runner.py`),
-    chattable or not, effort-configured or not.
+    ignores) `chat_queue`/`effort`/`live_messages` purely to match
+    `run_sdk_node`'s real keyword-only signature — `RunWorker` always
+    calls its configured execution runner with all three keywords now
+    (see `forge/tui/runner.py`), chattable or not, effort-configured or
+    not, live-trace-watched or not.
     """
     Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
     return ExecutionRunOutcome(completed=True, summary="wrote a passing test")

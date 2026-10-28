@@ -135,6 +135,7 @@ def test_active_chat_queue_is_set_only_for_the_execution_task_and_cleared_after(
         *,
         chat_queue: queue.Queue[str] | None = None,
         effort: EffortLevel | None = None,
+        live_messages: queue.Queue[object] | None = None,
     ) -> ExecutionRunOutcome:
         seen_chat_queues.append(chat_queue)
         return fake_execution_runner(model, prompt, profile, worktree_path, chat_queue=chat_queue)
@@ -178,6 +179,7 @@ def test_message_put_on_active_chat_queue_reaches_the_in_flight_attempt(
         *,
         chat_queue: queue.Queue[str] | None = None,
         effort: EffortLevel | None = None,
+        live_messages: queue.Queue[object] | None = None,
     ) -> ExecutionRunOutcome:
         if chat_queue is not None:
             with contextlib.suppress(queue.Empty):
@@ -204,3 +206,111 @@ def test_message_put_on_active_chat_queue_reaches_the_in_flight_attempt(
     assert worker.error is None
     assert received == ["hello from the main thread"]
     assert worker.active_chat_queue is None
+
+
+# -- live trace window: live_messages (post-M9 phase 3) ---------------------
+
+
+def test_live_messages_is_none_before_a_run_ever_starts(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    monkeypatch.setattr(runner_module, "run_sdk_node", fake_execution_runner)
+    db_path, run_id = _start_stalled_run(git_repo)
+
+    worker = RunWorker(run_id, db_path, git_repo)
+    assert worker.live_messages is None
+
+
+def test_live_messages_is_set_only_for_the_execution_task_and_cleared_after(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """
+    Same shape as `test_active_chat_queue_is_set_only_for_the_execution_
+    task_and_cleared_after`, for the opposite-direction channel: a
+    MECHANICAL task (`unit_verify_exec`) never reaches `run_sdk_node` at
+    all, so it never gets a `live_messages` queue either.
+    """
+    seen_live_queues: list[queue.Queue[object] | None] = []
+
+    def _tracking_runner(
+        model: str,
+        prompt: str,
+        profile: object,
+        worktree_path: str,
+        *,
+        chat_queue: queue.Queue[str] | None = None,
+        effort: EffortLevel | None = None,
+        live_messages: queue.Queue[object] | None = None,
+    ) -> ExecutionRunOutcome:
+        seen_live_queues.append(live_messages)
+        return fake_execution_runner(model, prompt, profile, worktree_path)
+
+    monkeypatch.setattr(runner_module, "run_sdk_node", _tracking_runner)
+    db_path, run_id = _start_stalled_run(git_repo)
+
+    worker = RunWorker(run_id, db_path, git_repo)
+    assert worker.live_messages is None
+    worker.start()
+
+    assert worker.done.wait(timeout=30), "RunWorker did not finish within 30s"
+    assert worker.error is None
+
+    assert len(seen_live_queues) == 1
+    assert seen_live_queues[0] is not None
+    assert worker.live_messages is None
+
+
+def test_message_put_on_live_messages_by_the_runner_is_readable_from_the_main_thread(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path
+) -> None:
+    """
+    Proves the cross-thread hand-off end to end at this layer, no Textual
+    involved: a fake runner that pushes a message onto the `live_messages`
+    queue it's handed (standing in for `run_execution_attempt`'s real
+    receive loop) results in the exact same object showing up on
+    `worker.live_messages` from this (the main) thread, while the attempt
+    is still genuinely in flight — not a copy, not visible only after the
+    attempt finishes.
+    """
+
+    def _live_message_emitting_runner(
+        model: str,
+        prompt: str,
+        profile: object,
+        worktree_path: str,
+        *,
+        chat_queue: queue.Queue[str] | None = None,
+        effort: EffortLevel | None = None,
+        live_messages: queue.Queue[object] | None = None,
+    ) -> ExecutionRunOutcome:
+        if live_messages is not None:
+            live_messages.put("assistant: hello")
+            # Generous, deliberate delay before returning — without it,
+            # `active_chat_queue`/`live_messages` goes right back to `None`
+            # (this method's own `finally`) so fast after being set that
+            # the polling loop below could easily never observe it
+            # non-`None` at all, same timing lesson this phase's own brief
+            # called out. Real `receive_response()` turns take far longer
+            # than this either way.
+            time.sleep(0.5)
+        return fake_execution_runner(model, prompt, profile, worktree_path)
+
+    monkeypatch.setattr(runner_module, "run_sdk_node", _live_message_emitting_runner)
+    db_path, run_id = _start_stalled_run(git_repo)
+    worker = RunWorker(run_id, db_path, git_repo)
+    worker.start()
+
+    deadline = time.monotonic() + 15.0
+    seen: object | None = None
+    while seen is None and time.monotonic() < deadline:
+        live_messages = worker.live_messages
+        if live_messages is not None:
+            with contextlib.suppress(queue.Empty):
+                seen = live_messages.get(timeout=0.5)
+        else:
+            time.sleep(0.05)
+    assert seen == "assistant: hello", "live message was never observed from the main thread"
+
+    assert worker.done.wait(timeout=30), "RunWorker did not finish within 30s"
+    assert worker.error is None
+    assert worker.live_messages is None

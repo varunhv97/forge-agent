@@ -49,6 +49,7 @@ def _chat_capturing_runner(received: list[str]):
         *,
         chat_queue: queue.Queue[str] | None = None,
         effort: object = None,
+        live_messages: queue.Queue[object] | None = None,
     ) -> ExecutionRunOutcome:
         if chat_queue is not None:
             with contextlib.suppress(queue.Empty):

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import queue
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from textual.app import App
 from textual.binding import Binding, BindingType
@@ -268,6 +268,21 @@ class ForgeApp(App[None]):
         if worker is None:
             return None
         return worker.active_chat_queue
+
+    def live_messages_for(self, run_id: str) -> queue.Queue[Any] | None:
+        """
+        The live-trace message queue for `run_id`'s currently in-flight
+        EXECUTION attempt, if one exists right now — `None` under the
+        exact same conditions as `active_chat_queue_for` (no `RunWorker`
+        for this run at all, the worker is between attempts, or the
+        current attempt is MECHANICAL). `LiveRunScreen`'s live-trace panel
+        polls this directly, same shape as the chat input polling
+        `active_chat_queue_for`.
+        """
+        worker = self._live_workers.get(run_id)
+        if worker is None:
+            return None
+        return worker.live_messages
 
 
 def run_tui(db_path_override: Path | None = None) -> int:

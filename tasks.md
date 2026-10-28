@@ -1054,6 +1054,134 @@ Commit messages hold the full history; this file is a short index.
       rejects a model for a MECHANICAL node type. Full suite (342 tests)
       run twice, clean both times; `black`/`ruff`/`mypy` (strict) clean.
 
+- [x] **Post-M9: effort-level customization, phase 3 of 4 (live trace window
+      into a running EXECUTION session).** A new `LiveRunScreen` panel
+      showing the real Claude Agent SDK messages a chattable EXECUTION
+      attempt produces as it runs — not just `#trace-log`'s abstracted
+      DISPATCH/RESULT lines. Claude-only (same reasoning as every prior
+      phase); doesn't touch the Codex adapter, `forge trace`'s plain-text
+      output, the DAG builder/canvas, or deploy/Vercel code.
+      - **Cross-thread channel:** `RunWorker.live_messages: queue.Queue[Any]
+        | None` (`forge/tui/runner.py`) — the same shape and lifecycle as
+        `active_chat_queue`, literally copied: a fresh, unbounded
+        `queue.Queue()` created and assigned just before
+        `_run_sdk_node_with_chat` calls `run_sdk_node(...,
+        live_messages=...)`, cleared back to `None` in the same `finally`.
+        `run_execution_attempt`'s receive loop
+        (`sdk_execution_adapter.py`) does `live_messages.put_nowait(message)`
+        right after appending each message to its own `messages` list —
+        never blocking, opposite direction from `chat_queue`. Unbounded is
+        deliberate: one turn's `receive_response()` yields a small,
+        human-paced number of discrete message objects (not raw token
+        deltas), so even a fully undrained attempt never approaches a
+        volume where a drop policy would matter — confirmed from
+        `claude_agent_sdk.types` directly, not assumed.
+      - **Overflow/backpressure:** none needed, per the above — no bounded
+        queue, no drop-oldest/drop-newest policy to choose between.
+      - **Cleanup on finish:** the real risk wasn't overflow, it was a
+        message still sitting in the queue the instant `RunWorker` clears
+        `live_messages` back to `None`. `LiveRunScreen._refresh_live_trace`
+        (`forge/tui/screens.py`) keeps its own `self._live_queue` reference
+        across polls, independent of `ForgeApp.live_messages_for`'s current
+        value: it drains from `self._live_queue` whenever that's still set,
+        even on the tick where `live_messages_for` has already gone back to
+        `None` — so a message enqueued right before the attempt ends still
+        gets its final drain instead of being stranded on a queue object
+        nothing reaches again. Proven deterministically (no real-time
+        racing) in `tests/tui/test_live_trace.py::test_a_message_left_in_
+        the_queue_when_the_attempt_ends_is_still_drained` by calling
+        `_refresh_live_trace` directly twice with a hand-controlled fake
+        `live_messages_for`, relying on there being no `await` between the
+        two calls so Textual's own 0.75s poll timer can't interleave. The
+        one race this doesn't close — an attempt starting *and* finishing
+        entirely between two poll ticks — is the same kind of gap
+        `active_chat_queue_for` already tolerates for the mirror-image
+        direction.
+      - **Rendering:** `render_live_message` (`sdk_execution_adapter.py` —
+        kept there, not in `forge/tui/*`, so only `forge/adapters/
+        execution/*` ever imports real `claude_agent_sdk` types, per the
+        project's existing rule) turns one message into zero or more short
+        lines: assistant text (collapsed to one line, truncated past 160
+        chars), a tool call (`tool name — key-argument summary`, e.g. `Bash
+        — pytest -q` or `Edit — app/login.py`, reusing the same
+        `_PATH_INPUT_KEY_BY_TOOL` map the real PreToolUse hook already uses
+        so the two never drift), a tool result (`ok`/`failed` plus a short
+        flattened-text summary, never a raw stdout dump), a `ThinkingBlock`
+        (a one-word `…` marker, not its content), and a terminal
+        `ResultMessage` (`turn done   <subtype>`). A `SystemMessage` and
+        other internal-plumbing message kinds render nothing at all, not an
+        empty placeholder line.
+      - **Separate panel, not merged into `#trace-log`:** a new `LIVE
+        SESSION` `LabeledPanel` (`#live-trace-log`, a second `RichLog`)
+        stacked full-width below the existing TASKS/TRACE row, with its own
+        one-line hint ("Abbreviated — only while a chattable attempt is
+        live. Full transcript: `claude --resume <sdk_session_id>`.").
+        Deliberate, not the default choice: `#trace-log` is
+        `compute_trace_entries`'s sorted, durable, whole-run replay
+        (`Store`-backed, identical days later via `forge trace`);
+        `#live-trace-log` is an unsorted, ephemeral, arrival-order stream
+        with a fundamentally different data source
+        (`ForgeApp.live_messages_for`) and a lifecycle scoped to one
+        chattable attempt. Forcing them into one widget would mean
+        inventing a fake timestamp for a live message just to interleave
+        it, for no real benefit over two panels a reader can already tell
+        apart by position and content (DISPATCH/RESULT/DECISION lines on
+        one side; `text`/`tool call`/`tool result` lines, mentioning real
+        shell commands and file paths, on the other).
+      - Wired into the existing 0.75s `refresh_run` poll loop
+        (`_refresh_live_trace`, called right alongside the existing
+        `_refresh_chat_input`) — same incremental-append discipline
+        `#trace-log` already established, no re-render or duplication.
+      - A rendering bug caught only by an actual screenshot, not by any
+        test: `tool result` is itself exactly 11 characters, so the first
+        version of `_live_line`'s plain `f"{label:<11}{rest}"` padding
+        butted the label straight up against the content with no gap at
+        all for that one label specifically (every shorter label still had
+        a visible gap, so nothing caught it until a rendered image was
+        actually inspected). Fixed by adding an explicit trailing space
+        separator, independent of the padding width.
+      - Tests: `tests/adapters/execution/test_sdk_execution_adapter.py`
+        gained message-streaming proof (`live_messages` has content while
+        the attempt is still mid-turn, not just after it returns) and a
+        full `render_live_message` suite (one case per message kind, plus
+        truncation/collapsing and the "produces nothing" `SystemMessage`
+        case). `tests/adapters/execution/test_sdk_node_runner.py` gained
+        the same default-`None`/forwarded-through pair every other
+        keyword-only parameter already has. `tests/tui/test_runner.py`
+        gained the `RunWorker.live_messages` lifecycle trio (`None` before
+        any run, set only for the EXECUTION task and cleared after, a
+        message put by the runner actually observable from the main
+        thread) mirroring the existing `active_chat_queue` tests exactly.
+        `tests/tui/test_live_trace.py` (new) is the real `Pilot`-driven
+        proof: a fake `run_sdk_node` emits real `AssistantMessage`/
+        `ToolUseBlock`/`UserMessage`/`ToolResultBlock` objects, and the
+        panel is asserted to actually show their rendered content (and
+        that `#trace-log` does *not* — proving the two panels really are
+        distinct) — plus the deterministic stranded-message test described
+        above, plus a scope-boundary test that a fully terminal run leaves
+        `live_messages_for` at `None`. Every existing `run_sdk_node`-double
+        across the TUI test suite (`tests/tui/conftest.py::
+        fake_execution_runner`, `test_runner.py`'s/`test_chat.py`'s inline
+        fakes) gained the new keyword-only `live_messages` parameter (same
+        as they already had for `chat_queue`/`effort`) so they keep
+        matching `run_sdk_node`'s real signature. Two `time.sleep` calls
+        in new fakes (`test_runner.py`, `test_live_trace.py`) are
+        deliberate, generous delays — without them the first version of
+        these tests was genuinely flaky (the fake returns near-instantly,
+        clearing `live_messages`/`active_chat_queue` back to `None` before
+        the polling/Pilot side ever observed it non-`None`), caught by
+        actually running the suite, not assumed up front. Full suite
+        (`pytest`, 363 tests) run twice, clean both times, plus the
+        timing-sensitive subset run three additional times in isolation;
+        `black`/`ruff`/`mypy` (strict) all clean. Visually confirmed via a
+        headless-driver screenshot (`qlmanage -t`, no real pty in this
+        sandbox) — the fix above was found this way, not by a passing test.
+      - **Not done, explicitly out of scope for this phase (as directed):**
+        the Codex adapter; the interrupt-and-resume model/effort swap
+        (phase 4, the one remaining phase in this arc); any change to
+        `forge trace`'s plain-text output, the DAG builder/canvas, or
+        deploy/Vercel code.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps

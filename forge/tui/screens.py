@@ -18,6 +18,7 @@ stay correct whether the light or dark theme is active.
 
 from __future__ import annotations
 
+import queue
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, cast
@@ -39,6 +40,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
+from forge.adapters.execution.sdk_execution_adapter import render_live_message
 from forge.cli import (
     build_inspect_report,
     compute_run_inspection,
@@ -612,6 +614,29 @@ class LiveRunScreen(Screen[None]):
     onto that `queue.Queue` (see `forge/tui/runner.py::RunWorker`) — never
     anything else; it reaches the live session the same way the model's
     own reasoning does, with no bypass of the controller/hook boundary.
+
+    `#live-trace-log` (post-M9 phase 3) is a *separate* panel from
+    `#trace-log`, deliberately, not a second kind of line merged into the
+    same one: `#trace-log` is `compute_trace_entries`'s sorted, durable,
+    whole-run replay (every DISPATCH/RESULT/DECISION entry, re-readable
+    identically days later via `forge trace`); `#live-trace-log` is an
+    unsorted, ephemeral, arrival-order stream that only ever has content
+    for the span of one chattable EXECUTION attempt and is gone once it
+    ends — different lifecycle, different ordering guarantee, and a
+    fundamentally different data source (`ForgeApp.live_messages_for`, not
+    `Store`). Forcing those two into one widget would mean inventing a
+    fake timestamp for a live message just to interleave it, for no real
+    benefit over two panels a reader can already tell apart on sight.
+    Every poll tick drains whatever's newly arrived via `_refresh_live_trace`
+    and renders each message through `render_live_message` (`forge/adapters/
+    execution/sdk_execution_adapter.py` — the one place that still imports
+    real `claude_agent_sdk` types, per this project's existing rule) into a
+    handful of short, labeled lines (`text`/`tool call`/`tool result`/`turn
+    done`) rather than a raw protocol dump; the panel's own hint line says
+    where to get the full, unabridged transcript instead. Only ever has
+    content while a chattable EXECUTION attempt is actually running —
+    before/after/during a MECHANICAL attempt, there is nothing to drain,
+    same scope boundary the chat input above already established.
     """
 
     # Panning moves by a fixed character step per keypress rather than the
@@ -654,6 +679,16 @@ class LiveRunScreen(Screen[None]):
     }
     LiveRunScreen #trace-log {
         height: 1fr;
+    }
+    LiveRunScreen #live-session-panel {
+        height: 11;
+    }
+    LiveRunScreen #live-trace-log {
+        height: 1fr;
+    }
+    LiveRunScreen #live-trace-hint {
+        height: 2;
+        color: $text-muted;
     }
     LiveRunScreen #graph-panel {
         height: 1fr;
@@ -701,6 +736,13 @@ class LiveRunScreen(Screen[None]):
         self._layout: DagLayout | None = None
         self._layout_graph_version_id: str | None = None
         self._detail: DagDetail = "full"
+        # The live-trace queue this screen last drained from (see
+        # `_refresh_live_trace`) — kept across polls, independent of
+        # `ForgeApp.live_messages_for`'s own current value, specifically so
+        # a message still sitting in the queue when the attempt ends (and
+        # `RunWorker.live_messages` goes back to `None`) still gets one
+        # final drain instead of being stranded.
+        self._live_queue: queue.Queue[Any] | None = None
 
     def compose(self) -> ComposeResult:
         yield Chrome(title=f"forge — run {self.run_id}")
@@ -714,6 +756,13 @@ class LiveRunScreen(Screen[None]):
                 )
             with LabeledPanel("TRACE", id="trace-panel"):
                 yield RichLog(id="trace-log", wrap=True, highlight=False, markup=False)
+        with LabeledPanel("LIVE SESSION", id="live-session-panel"):
+            yield RichLog(id="live-trace-log", wrap=True, highlight=False, markup=False)
+            yield Static(
+                "Abbreviated — only while a chattable attempt is live. "
+                "Full transcript: claude --resume <sdk_session_id>.",
+                id="live-trace-hint",
+            )
         with LabeledPanel("GRAPH", id="graph-panel"):
             with VerticalScroll(id="graph-view"):
                 yield Static("", id="dag-canvas")
@@ -821,6 +870,7 @@ class LiveRunScreen(Screen[None]):
         self.query_one("#dag-canvas", Static).update(canvas_text)
         self._update_minimap()
         self._refresh_chat_input()
+        self._refresh_live_trace()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         return not (action in self._GRAPH_ONLY_ACTIONS and not self._showing_graph)
@@ -968,6 +1018,48 @@ class LiveRunScreen(Screen[None]):
         chat_queue.put(message)
         event.input.value = ""
         self.app.notify("Message sent to the live session.", timeout=2)
+
+    # -- live trace window (post-M9 phase 3) -----------------------------------
+
+    def _refresh_live_trace(self) -> None:
+        """
+        Drains whatever's newly arrived on the live-trace queue for this
+        run's currently in-flight EXECUTION attempt (if any) and appends
+        each message's rendered lines to `#live-trace-log` — the
+        incremental-append counterpart to how `refresh_run` already
+        appends only the *new* `#trace-log` entries each tick, never
+        re-rendering or duplicating what's already there.
+
+        Reads `ForgeApp.live_messages_for(self.run_id)` fresh every tick
+        (it can go from `None` to a fresh queue and back to `None` any
+        number of times over a run's life, once per chattable attempt) but
+        drains from `self._live_queue` — the *previous* tick's queue
+        reference — whenever that's still set, even if the current call
+        just returned `None`. This is what guarantees a message that was
+        already sitting on the queue the moment the attempt finished (and
+        `RunWorker` cleared its own `live_messages` attribute back to
+        `None` in its `finally`) still gets drained and rendered here,
+        rather than being stranded on a queue object nothing reaches
+        again — the exact "what happens to a message still in the queue
+        when the attempt ends" question this feature's own brief called
+        out. The one race this doesn't close (an attempt starting and
+        finishing entirely between two 0.75s poll ticks, so this method
+        never observes its queue at all) is the same kind of tolerated gap
+        `LiveRunScreen`'s own chat input already accepts for the mirror-
+        image race on `active_chat_queue_for`.
+        """
+        current_queue = _get_app(self).live_messages_for(self.run_id)
+        drain_from = current_queue if current_queue is not None else self._live_queue
+        if drain_from is not None:
+            log = self.query_one("#live-trace-log", RichLog)
+            while True:
+                try:
+                    message = drain_from.get_nowait()
+                except queue.Empty:
+                    break
+                for line in render_live_message(message):
+                    log.write(line)
+        self._live_queue = current_queue
 
 
 # -- run summary (terminal runs, opened from the dashboard) ----------------------

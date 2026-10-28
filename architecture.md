@@ -162,7 +162,16 @@ forge/
                   every message polled off the queue; with no queue at
                   all this is a plain ClaudeSDKClient turn with nothing
                   injected, the observably-identical baseline the swap
-                  was proven against first. build_claude_agent_options also
+                  was proven against first. An optional live_messages:
+                  queue.Queue[Any] | None (post-M9 phase 3) gets every
+                  message put_nowait'd onto it the moment it's appended to
+                  messages — the live-trace counterpart to chat_queue, same
+                  cross-thread-queue.Queue shape, opposite direction; see
+                  "Live trace window, concretely" below. render_live_message
+                  (same module, so only here does forge/tui/* reach a real
+                  claude_agent_sdk type at all) turns one message into the
+                  short, abbreviated lines that window shows.
+                  build_claude_agent_options also
                   takes an optional effort: EffortLevel | None, set
                   straight onto the real ClaudeAgentOptions.effort field —
                   confirmed from claude_agent_sdk.types directly that this
@@ -249,7 +258,9 @@ forge/
                     active_chat_queue_for(run_id) (M9 phase 6) is the one
                     new read-only accessor LiveRunScreen's chat input
                     polls: None when there's no RunWorker for that run,
-                    or its own active_chat_queue is currently None
+                    or its own active_chat_queue is currently None.
+                    live_messages_for(run_id) (post-M9 phase 3) is the same
+                    shape for the live trace panel's own queue.
     runner.py       RunWorker — one threading.Thread per live run, its
                     own SQLite connection (db.connect, WAL mode), driving
                     the real run_to_completion with the real registries.
@@ -271,7 +282,13 @@ forge/
                     and every other MECHANICAL node needed no change and
                     never gets a queue. A message put after the queue has
                     already gone back to None lands nowhere: a plain
-                    queue.Queue.put never raises, it's just unread
+                    queue.Queue.put never raises, it's just unread.
+                    live_messages: queue.Queue[Any] | None (post-M9 phase
+                    3) is set/cleared by that same _run_sdk_node_with_chat
+                    call, same finally, literally the chat_queue pattern
+                    copied for the opposite direction — see "Live trace
+                    window, concretely" below for the unbounded-queue and
+                    stranded-message reasoning.
     chrome.py       Chrome — the three-dot-plus-title bar used in place
                     of Header() on every screen (post-M9 restyle to match
                     the original mockups). Dots use each semantic color's
@@ -381,7 +398,21 @@ forge/
                     present, the message is queued and the input clears;
                     gone, the attempt is rejected with a visible warning
                     notify and the typed text is left in place, never
-                    cleared as if it had been sent.
+                    cleared as if it had been sent. #live-trace-log
+                    (post-M9 phase 3, a LIVE SESSION LabeledPanel of its
+                    own, stacked full-width below the TASKS/TRACE row) is
+                    a second RichLog, deliberately separate from
+                    #trace-log — see "Live trace window, concretely"
+                    below for why. _refresh_live_trace, called from the
+                    same refresh_run poll tick right alongside
+                    _refresh_chat_input, drains ForgeApp.
+                    live_messages_for(self.run_id) through
+                    render_live_message (forge/adapters/execution/
+                    sdk_execution_adapter.py) and appends the resulting
+                    lines, tracking its own self._live_queue reference
+                    (not just the current live_messages_for value) across
+                    polls so a message still queued the instant the
+                    attempt ends still gets drained.
     dag_layout.py   compute_dag_layout(tasks, edges) -> DagLayout — pure,
                     zero Textual imports. rank = longest path from a root
                     (no incoming "dependency" edge), which spreads a
@@ -584,6 +615,45 @@ capture-and-expose only — `forge inspect <run_id> <task_id>` prints it
 nothing in Forge reads it back or passes it into a later attempt's
 `ClaudeAgentOptions`. Always `None` for a MECHANICAL attempt or a Codex CLI
 one.
+
+## Live trace window, concretely
+
+A third cross-thread `queue.Queue`, alongside `active_chat_queue`'s
+message-in and the attempt-result's data-out: `RunWorker.live_messages:
+queue.Queue[Any] | None` (`forge/tui/runner.py`), same lifecycle as
+`active_chat_queue` — created fresh and assigned just before
+`_run_sdk_node_with_chat` calls `run_sdk_node(..., live_messages=...)`,
+cleared back to `None` in the same `finally`, so being driven through this
+wrapper is still the one "this attempt is chattable" signal, now for two
+channels instead of one. `run_execution_attempt`'s receive loop
+(`sdk_execution_adapter.py`) does a non-blocking `live_messages.put_nowait(
+message)` right after appending each message to its own `messages` list —
+opposite direction from `chat_queue`, same non-blocking spirit. Unbounded
+on purpose: one turn's `receive_response()` yields a small, human-paced
+number of discrete message objects, not raw token deltas, so no drop
+policy is needed. `LiveRunScreen._refresh_live_trace` keeps its own
+`self._live_queue` reference across polls (independent of `ForgeApp.
+live_messages_for`'s current value) specifically so a message still
+sitting on the queue the instant `RunWorker` clears `live_messages` back
+to `None` still gets one final drain instead of being stranded.
+
+`render_live_message` (kept in `sdk_execution_adapter.py`, not
+`forge/tui/*`, so only `forge/adapters/execution/*` ever imports real
+`claude_agent_sdk` types) turns one message into zero or more short lines
+— assistant text, a tool call (name plus a one-line key-argument summary,
+reusing the same `_PATH_INPUT_KEY_BY_TOOL` map the real PreToolUse hook
+already uses), a tool result (pass/fail plus a short summary, never a raw
+dump), a one-word `ThinkingBlock` marker, and a one-line terminal
+`ResultMessage` marker; a `SystemMessage` and other internal-plumbing
+kinds render nothing. `LiveRunScreen` shows this in its own `LIVE SESSION`
+panel (`#live-trace-log`), deliberately separate from `#trace-log`:
+`#trace-log` is `compute_trace_entries`'s sorted, durable, `Store`-backed
+whole-run replay; the live panel is an unsorted, ephemeral,
+arrival-order stream scoped to one chattable attempt's lifetime, with no
+real timestamp to sort by. Both panels are driven from the same 0.75s
+`refresh_run` poll tick, each with its own incremental-append tracking.
+Claude-only (Codex adapter untouched), same reasoning as every other
+model/effort/observability phase in this arc.
 
 ## Enforcement, concretely
 

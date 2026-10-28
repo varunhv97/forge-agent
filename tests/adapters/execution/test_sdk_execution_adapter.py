@@ -6,7 +6,17 @@ from collections.abc import Awaitable, Mapping
 from typing import Any, ClassVar, TypeVar, cast
 
 import pytest
-from claude_agent_sdk import HookMatcher, ResultMessage
+from claude_agent_sdk import (
+    AssistantMessage,
+    HookMatcher,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from claude_agent_sdk.types import HookJSONOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput
 
 from forge.adapters.execution import sdk_execution_adapter
@@ -15,6 +25,7 @@ from forge.adapters.execution.sdk_execution_adapter import (
     build_claude_agent_options,
     hook_json_output_from_decision,
     make_pretooluse_hook_callback,
+    render_live_message,
     run_execution_attempt,
     tool_call_event_from_hook_input,
 )
@@ -495,3 +506,207 @@ def test_chat_forwarding_failure_does_not_replace_the_receive_loops_own_result(
 
     result = asyncio.run(_drive())
     assert result.messages == ["assistant: fine"]
+
+
+# -- live_messages: the live-trace cross-thread channel (post-M9 phase 3) --
+
+
+def test_live_messages_receives_each_message_as_it_arrives_not_just_at_the_end(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The core proof this cross-thread channel actually streams: a message
+    from the *first* response chunk is sitting on `live_messages` while
+    the attempt is still in flight (waiting on the second, deliberately
+    delayed chunk), not just visible once `run_execution_attempt` finally
+    returns. Mirrors `test_chat_message_forwarded_via_query_on_the_same_
+    client_before_attempt_completes`'s shape for the opposite direction.
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: part one"], ["assistant: part two"]], turn_delay_seconds=0.2
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    live_messages: queue.Queue[Any] = queue.Queue()
+    seen_mid_flight: list[Any] = []
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                live_messages=live_messages,
+            )
+        )
+        # Well inside the first 0.2s chunk delay but after it should have
+        # landed; well before the second chunk's own delay elapses.
+        await asyncio.sleep(0.25)
+        while True:
+            try:
+                seen_mid_flight.append(live_messages.get_nowait())
+            except queue.Empty:
+                break
+        return await attempt
+
+    result = asyncio.run(_drive())
+
+    assert seen_mid_flight == ["assistant: part one"]
+    # Drained mid-flight, so nothing's left for a second drain after the
+    # attempt finishes — but the full message list is still intact.
+    assert result.messages == ["assistant: part one", "assistant: part two"]
+
+
+def test_live_messages_gets_every_message_the_attempt_produces(monkeypatch: pytest.MonkeyPatch):
+    """Simpler end-state check: every message that ends up in
+    `result.messages` also ends up on `live_messages`, in the same order,
+    once the attempt is done and nothing has drained it yet."""
+    fake_cls = _make_fake_client_class([["assistant: hello", "assistant: world"]])
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    live_messages: queue.Queue[Any] = queue.Queue()
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+            live_messages=live_messages,
+        )
+    )
+
+    drained = []
+    while True:
+        try:
+            drained.append(live_messages.get_nowait())
+        except queue.Empty:
+            break
+    assert drained == result.messages == ["assistant: hello", "assistant: world"]
+
+
+def test_no_live_messages_queue_is_the_byte_for_byte_default_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With no `live_messages` argument at all (every caller outside the
+    TUI), nothing changes — this is the same baseline-preservation
+    guarantee `chat_queue` already got when it was added."""
+    fake_cls = _make_fake_client_class([["assistant: hello"]])
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+        )
+    )
+    assert result.messages == ["assistant: hello"]
+
+
+# -- render_live_message: abbreviated rendering for the live trace window --
+
+
+def test_render_assistant_text_block():
+    message = AssistantMessage(content=[TextBlock(text="hello there")], model="claude-sonnet-5")
+    (line,) = render_live_message(message)
+    assert line.startswith("text")
+    assert line.endswith("hello there")
+
+
+def test_render_assistant_text_collapses_newlines_and_truncates():
+    long_text = "line one\nline two\n" + "x" * 300
+    message = AssistantMessage(content=[TextBlock(text=long_text)], model="claude-sonnet-5")
+    (line,) = render_live_message(message)
+    assert "\n" not in line
+    assert line.endswith("…")
+    assert len(line) < len(long_text)
+
+
+def test_render_thinking_block_is_a_short_marker_not_the_raw_content():
+    message = AssistantMessage(
+        content=[ThinkingBlock(thinking="a very long chain of reasoning" * 20, signature="sig")],
+        model="claude-sonnet-5",
+    )
+    lines = render_live_message(message)
+    assert len(lines) == 1
+    assert lines[0].startswith("thinking")
+    assert "a very long chain" not in lines[0]
+
+
+def test_render_tool_call_bash_shows_the_command_not_raw_json():
+    message = AssistantMessage(
+        content=[ToolUseBlock(id="tu_1", name="Bash", input={"command": "pytest -q"})],
+        model="claude-sonnet-5",
+    )
+    (line,) = render_live_message(message)
+    assert "Bash" in line
+    assert "pytest -q" in line
+    assert "{" not in line  # not a raw dict dump
+
+
+def test_render_tool_call_file_tool_shows_the_path():
+    message = AssistantMessage(
+        content=[ToolUseBlock(id="tu_2", name="Edit", input={"file_path": "/a/b.py", "old": "x"})],
+        model="claude-sonnet-5",
+    )
+    (line,) = render_live_message(message)
+    assert "Edit" in line
+    assert "/a/b.py" in line
+
+
+def test_render_tool_call_with_no_input_shows_just_the_name():
+    message = AssistantMessage(
+        content=[ToolUseBlock(id="tu_3", name="Glob", input={})], model="claude-sonnet-5"
+    )
+    (line,) = render_live_message(message)
+    assert "Glob" in line
+
+
+def test_render_tool_result_ok_and_failed():
+    ok_message = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tu_1", content="all good", is_error=False)]
+    )
+    failed_message = UserMessage(
+        content=[ToolResultBlock(tool_use_id="tu_1", content="boom", is_error=True)]
+    )
+    (ok_line,) = render_live_message(ok_message)
+    (failed_line,) = render_live_message(failed_message)
+    assert "ok" in ok_line
+    assert "all good" in ok_line
+    assert "failed" in failed_line
+    assert "boom" in failed_line
+
+
+def test_render_tool_result_with_list_content_blocks_extracts_text():
+    message = UserMessage(
+        content=[
+            ToolResultBlock(
+                tool_use_id="tu_1",
+                content=[{"type": "text", "text": "stdout here"}, {"type": "image"}],
+                is_error=False,
+            )
+        ]
+    )
+    (line,) = render_live_message(message)
+    assert "stdout here" in line
+
+
+def test_render_result_message_is_a_short_turn_finished_marker():
+    message = ResultMessage(
+        subtype="success",
+        duration_ms=10,
+        duration_api_ms=9,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-1",
+    )
+    (line,) = render_live_message(message)
+    assert "success" in line
+
+
+def test_render_system_message_produces_no_lines():
+    """Internal CLI plumbing a human watching this window doesn't need —
+    renders nothing, not an empty/placeholder line."""
+    message = SystemMessage(subtype="init", data={})
+    assert render_live_message(message) == []

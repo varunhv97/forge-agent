@@ -7,14 +7,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from claude_agent_sdk import (
+    AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookContext,
     HookInput,
     HookMatcher,
+    Message,
     ResultMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
 )
-from claude_agent_sdk.types import SyncHookJSONOutput
+from claude_agent_sdk.types import ServerToolResultBlock, ServerToolUseBlock, SyncHookJSONOutput
 
 from forge.isolation.hooks import (
     HookDecision,
@@ -203,6 +210,118 @@ def _session_id_from_messages(messages: list[Any]) -> str | None:
     return None
 
 
+# -- live trace rendering -----------------------------------------------------
+#
+# `render_live_message` turns one real `claude_agent_sdk` message into a
+# short list of human-legible lines, for the TUI's live trace window (M9
+# post-M9 phase 3) — a window into the running session, not a raw protocol
+# dump. Kept in this module rather than `forge/tui/*` specifically so the
+# project's existing rule holds: only `forge/adapters/execution/*` ever
+# imports `claude_agent_sdk` types directly (see `forge/models/common.py`'s
+# own `EffortLevel` docstring for the same principle applied to a type
+# instead of a function); `forge/tui/screens.py` only imports this plain
+# function, never a real SDK type.
+
+_LIVE_LABEL_WIDTH = 11
+_LIVE_TEXT_LIMIT = 160
+
+
+def _collapse_and_truncate(text: str, limit: int = _LIVE_TEXT_LIMIT) -> str:
+    """Collapses embedded newlines/repeated whitespace to single spaces (so
+    one message always renders as one line here, matching this window's own
+    "abbreviated, not a transcript" goal) and truncates past `limit`."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _live_line(label: str, rest: str) -> str:
+    # The explicit trailing space (not folded into `_LIVE_LABEL_WIDTH`'s own
+    # padding) is deliberate: "tool result" is itself exactly 11 characters,
+    # so a plain `f"{label:<11}{rest}"` would butt right up against `rest`
+    # with no gap at all for that one label — confirmed by actually looking
+    # at a rendered screenshot, not assumed. This guarantees at least one
+    # space between every label and its content, even the longest one.
+    return f"{label:<{_LIVE_LABEL_WIDTH}} {rest}"
+
+
+def _tool_call_summary(name: str, tool_input: Mapping[str, Any]) -> str:
+    """
+    A short one-line summary of a tool call's *key* argument, not its full
+    raw JSON input — the command for Bash, the path for a file tool, or
+    (for anything else) just its first argument, truncated. Reuses
+    `_PATH_INPUT_KEY_BY_TOOL`, the same per-tool key map
+    `tool_call_event_from_hook_input` already uses for the real permission
+    check, so this never drifts from what that enforcement path considers
+    "the" argument for a given tool.
+    """
+    if name == "Bash":
+        command = tool_input.get("command")
+        return _collapse_and_truncate(str(command)) if command else ""
+    path_key = _PATH_INPUT_KEY_BY_TOOL.get(name)
+    if path_key and tool_input.get(path_key):
+        return _collapse_and_truncate(str(tool_input[path_key]))
+    if not tool_input:
+        return ""
+    first_key, first_value = next(iter(tool_input.items()))
+    return _collapse_and_truncate(f"{first_key}={first_value}")
+
+
+def _tool_result_text(content: str | list[dict[str, Any]] | dict[str, Any] | None) -> str:
+    """Flattens a tool result's `content` (a bare string, or the API's
+    list-of-content-block-dicts shape) down to its text, if any — opaque
+    non-text content (e.g. an image block) contributes nothing rather than
+    a raw dict dump."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return str(content.get("text", "")) if content.get("type") == "text" else ""
+    parts = [str(block.get("text", "")) for block in content if block.get("type") == "text"]
+    return " ".join(part for part in parts if part)
+
+
+def render_live_message(message: Message) -> list[str]:
+    """
+    Renders one message yielded by `ClaudeSDKClient.receive_response()` as
+    zero or more short, legible lines — the abbreviated view the live trace
+    window shows, not the full transcript (that's still one `claude --resume
+    <session_id>` away). Deliberately narrow: assistant text, a tool call (name
+    + key-argument summary), and a tool result (pass/fail + a short summary)
+    are the three kinds explicitly called for; a `ThinkingBlock` gets a
+    one-word marker (its content is rarely useful abbreviated, and showing
+    none at all would look like a stall); a terminal `ResultMessage` gets a
+    one-line "turn finished" marker; everything else (e.g. a `SystemMessage`,
+    internal CLI plumbing) renders nothing, not an empty/placeholder line.
+    """
+    lines: list[str] = []
+    if isinstance(message, AssistantMessage):
+        for block in message.content:
+            if isinstance(block, TextBlock):
+                lines.append(_live_line("text", _collapse_and_truncate(block.text)))
+            elif isinstance(block, ThinkingBlock):
+                lines.append(_live_line("thinking", "…"))
+            elif isinstance(block, (ToolUseBlock, ServerToolUseBlock)):
+                summary = _tool_call_summary(block.name, block.input)
+                rest = f"{block.name} — {summary}" if summary else block.name
+                lines.append(_live_line("tool call", rest))
+    elif isinstance(message, UserMessage):
+        content = message.content
+        blocks = content if isinstance(content, list) else []
+        for block in blocks:
+            if isinstance(block, (ToolResultBlock, ServerToolResultBlock)):
+                is_error = getattr(block, "is_error", None)
+                status = "failed" if is_error else "ok"
+                text = _collapse_and_truncate(_tool_result_text(block.content))
+                rest = f"{status} - {text}" if text else status
+                lines.append(_live_line("tool result", rest))
+    elif isinstance(message, ResultMessage):
+        lines.append(_live_line("turn done", message.subtype))
+    return lines
+
+
 # How often `_forward_chat_messages` polls the cross-thread `queue.Queue`
 # for a new chat message, in seconds. A short non-blocking `get_nowait()`
 # poll rather than `queue.Queue.get(timeout=...)` — that call blocks the
@@ -255,6 +374,7 @@ async def run_execution_attempt(
     max_turns: int | None = None,
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
+    live_messages: queue.Queue[Any] | None = None,
 ) -> ExecutionResult:
     """
     Runs one execution node's prompt through a live Claude Agent SDK
@@ -295,6 +415,16 @@ async def run_execution_attempt(
     (the default) leaves `ClaudeAgentOptions.effort` unset, same as before
     this parameter existed.
 
+    `live_messages`, when given, gets every message `receive_response()`
+    yields pushed onto it (`put_nowait`, never blocking the receive loop)
+    the moment it's appended to `messages` — the live-trace counterpart to
+    `chat_queue`, same cross-thread-`queue.Queue` shape, opposite
+    direction: `forge/tui/runner.py`'s `RunWorker` is what drains this one,
+    from the main thread, while this coroutine keeps running on its own
+    background thread's event loop. `None` (the default) means nothing is
+    pushed anywhere — byte-for-byte what this function did before this
+    parameter existed.
+
     This makes a real call to the Anthropic API via the bundled Claude Code
     CLI subprocess and therefore requires network access and either
     `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session, which is
@@ -326,6 +456,14 @@ async def run_execution_attempt(
             try:
                 async for message in client.receive_response():
                     messages.append(message)
+                    if live_messages is not None:
+                        # Unbounded by design (see `RunWorker.live_messages`'s
+                        # own docstring for the full reasoning): one attempt's
+                        # turn yields a small, human-paced number of discrete
+                        # messages (not raw token deltas), so `put_nowait`
+                        # here can never raise `queue.Full` and never blocks
+                        # this loop on a slow/absent drainer.
+                        live_messages.put_nowait(message)
             finally:
                 stop_event.set()
 

@@ -27,6 +27,28 @@ the main thread via `ForgeApp.active_chat_queue_for` to decide whether its
 chat input is enabled — a single thread-safe pointer (plain attribute
 assignment is atomic under the GIL) is all that's needed, not a second
 notification mechanism.
+
+`RunWorker.live_messages` (post-M9 phase 3, the live trace window) is the
+same shape, opposite direction: a `queue.Queue[Any] | None`, also set up
+and torn down by `_run_sdk_node_with_chat` alongside `active_chat_queue`
+(same `finally`, literally copied, per this phase's own explicit
+instruction to reuse that pattern rather than reinvent it) — non-`None`
+for exactly the duration of one EXECUTION attempt, `None` the rest of the
+time (between attempts, during a MECHANICAL one, before the first attempt,
+after the run finishes). Unbounded (`queue.Queue()`, no `maxsize`) is a
+deliberate choice, not an oversight: a single attempt's `receive_response()`
+turn yields a small, human-paced number of discrete messages (complete
+`AssistantMessage`/`UserMessage`/`ResultMessage` objects, not raw streaming
+token deltas — confirmed from `claude_agent_sdk.types`), so even an
+unread backlog across a whole attempt is at most dozens of small objects,
+never an unbounded-growth risk the way a token-level stream would be; a
+bounded queue would only add a drop policy (oldest? newest?) this volume
+never needs. `LiveRunScreen` drains it on every 0.75s poll tick — see
+that module's own docstring for how it still drains whatever was already
+enqueued even after this attribute has gone back to `None` (the attempt
+finished before the last drain), so a message that arrives right at the
+end of an attempt is never silently lost, only ever delivered late by at
+most one poll tick.
 """
 
 from __future__ import annotations
@@ -34,6 +56,7 @@ from __future__ import annotations
 import queue
 import threading
 from pathlib import Path
+from typing import Any
 
 from forge.adapters.deploy.vercel_adapter import VercelDeployAdapter
 from forge.adapters.execution.sdk_node_runner import run_sdk_node
@@ -75,6 +98,9 @@ class RunWorker:
         # Non-None for exactly the duration of one EXECUTION attempt — see
         # `_run_sdk_node_with_chat` and this module's own docstring.
         self.active_chat_queue: queue.Queue[str] | None = None
+        # Same lifecycle, opposite direction — see this module's own
+        # docstring for the unbounded-queue/backpressure reasoning.
+        self.live_messages: queue.Queue[Any] | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -113,15 +139,30 @@ class RunWorker:
         execution_runner`, which the scheduler now calls with `effort=`
         on every EXECUTION dispatch — this method has no logic of its own
         for it, just forwards it straight to `run_sdk_node`.
+
+        `live_messages` gets the exact same fresh-queue/set/finally-clear
+        treatment as `chat_queue`, literally copied — this module's own
+        docstring already worked out that pattern for one cross-thread
+        channel, and nothing about adding a second one (opposite
+        direction) changes it.
         """
         chat_queue: queue.Queue[str] = queue.Queue()
+        live_messages: queue.Queue[Any] = queue.Queue()
         self.active_chat_queue = chat_queue
+        self.live_messages = live_messages
         try:
             return run_sdk_node(
-                model, prompt, profile, worktree_path, chat_queue=chat_queue, effort=effort
+                model,
+                prompt,
+                profile,
+                worktree_path,
+                chat_queue=chat_queue,
+                effort=effort,
+                live_messages=live_messages,
             )
         finally:
             self.active_chat_queue = None
+            self.live_messages = None
 
     def _run(self) -> None:
         conn = db.connect(self.db_path)

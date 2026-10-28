@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+from typing import Any
 
 from forge.adapters.execution.sdk_execution_adapter import run_execution_attempt
 from forge.controller.execution_registry import ExecutionRunOutcome
@@ -17,6 +18,7 @@ def run_sdk_node(
     *,
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
+    live_messages: queue.Queue[Any] | None = None,
 ) -> ExecutionRunOutcome:
     """
     Bridges the scheduler's synchronous `ExecutionRunner` contract to the
@@ -40,6 +42,13 @@ def run_sdk_node(
     shape as `chat_queue` — the scheduler's `select_effort` is what
     actually decides the value; this bridge just forwards it unchanged.
 
+    `live_messages`, when given, is handed straight through too — the
+    live-trace counterpart to `chat_queue` (opposite direction: this is
+    where messages flow *out* of the session as they arrive, not where a
+    chat message flows in), same keyword-only, `None`-by-default shape.
+    This bridge has no logic of its own for any of these three; it just
+    forwards them.
+
     `ExecutionRunOutcome.session_id` is threaded straight through from
     `result.session_id` (the real Claude Agent SDK session id off the
     turn's terminal `ResultMessage`, or `None` if there wasn't one) — this
@@ -55,6 +64,7 @@ def run_sdk_node(
                 model=model,
                 chat_queue=chat_queue,
                 effort=effort,
+                live_messages=live_messages,
             )
         )
     except Exception as exc:  # noqa: BLE001 - any adapter failure is a failed attempt, by contract
