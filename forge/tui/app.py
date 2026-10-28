@@ -84,6 +84,27 @@ class ForgeApp(App[None]):
     .footer-key--description {
         color: $text-muted;
     }
+
+    /* Every DataTable in this app (DashboardScreen's run list,
+       LiveRunScreen's task list) gets this instead of the stock
+       `datatable--cursor` look, which is a flat, full-opacity
+       `$block-cursor-background` (solid `$primary`, bold text by default
+       on most themes) — a hard-edged solid block, confirmed from
+       `textual.widgets._data_table.DataTable.DEFAULT_CSS` for this
+       installed version rather than guessed. `$primary-muted` is already
+       a real theme token (`primary.blend(background, 0.7)`, confirmed
+       from `textual.design.ColorSystem`) — a soft, accent-tinted
+       background rather than a solid block, and `text-style: none`
+       keeps the selected row's text the same normal weight as every
+       other row (see the general weight pass below) instead of flipping
+       bold on select. The *un*focused cursor (`$block-cursor-blurred-*`,
+       already an alpha-blended tint) is left exactly as Textual draws
+       it — only the harsh, focused state needed overriding. */
+    DataTable:focus > .datatable--cursor {
+        background: $primary-muted;
+        color: $text;
+        text-style: none;
+    }
     """
 
     def __init__(self, *, db_path_override: Path | None = None) -> None:
@@ -109,7 +130,16 @@ class ForgeApp(App[None]):
         return self._store
 
     def on_mount(self) -> None:
-        self.theme = "textual-light"  # Light by default; `t` toggles to dark.
+        # Light by default; `t` toggles to dark. `catppuccin-latte`/
+        # `catppuccin-mocha` (confirmed still registered in this Textual
+        # version via `App().available_themes`) replace the stock
+        # `textual-light`/`textual-dark` pair a prior restyle pass left in
+        # place — that pair is Textual's own bland default (a dull,
+        # minimal-variety gray), not an actual theme choice. This project's
+        # own theme-gallery comparison settled on this catppuccin pair
+        # (soft pastel, purple-forward, vivid without being garish) for
+        # both halves of the light/dark toggle.
+        self.theme = "catppuccin-latte"
         self.run_worker(self._discover_and_start(), exclusive=True, name="discovery")
 
     async def _discover_and_start(self) -> None:
@@ -137,7 +167,7 @@ class ForgeApp(App[None]):
         self.push_screen(DashboardScreen())
 
     def action_toggle_theme(self) -> None:
-        self.theme = "textual-dark" if self.theme == "textual-light" else "textual-light"
+        self.theme = "catppuccin-mocha" if self.theme == "catppuccin-latte" else "catppuccin-latte"
 
     # -- data the screens need, without reaching past this layer -----------------
 

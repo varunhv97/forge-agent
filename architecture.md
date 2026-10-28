@@ -178,8 +178,18 @@ forge/
                     forge/project.py discovery forge run/resume/list use
                     (NotAGitRepoError surfaces as a real ConfirmModal, not
                     input()); owns one read-only Store every screen polls;
-                    theme defaults to "textual-light" (Textual 8.2.8
-                    defaults dark otherwise), `t` toggles it.
+                    theme defaults to "catppuccin-latte" (confirmed
+                    registered via App().available_themes; Textual 8.2.8
+                    defaults to "textual-dark" otherwise), `t` toggles it
+                    to "catppuccin-mocha" — not the stock
+                    textual-light/textual-dark pair a first restyle pass
+                    left in place (Textual's own bland default, not an
+                    actual theme choice; fixed in the restyle follow-up,
+                    see tasks.md). ForgeApp.CSS also restyles every
+                    DataTable's focused row-cursor (`$primary-muted`, a
+                    real soft accent-tinted blend token, `text-style:
+                    none`) in place of the stock full-opacity solid
+                    `$block-cursor-background` block.
                     start_new_run builds the request/graph through the
                     same build_feature_blast_request_and_graph/
                     build_custom_dag_request_and_graph +
@@ -240,6 +250,12 @@ forge/
                     box-model gotcha found building this: with `height: 1`
                     plus the label's own `border-bottom`, the border
                     claimed the row and the text never painted.
+                    `background: $surface` on the panel itself (restyle
+                    follow-up — it had none before, so every panel just
+                    inherited the Screen's own `$background` and read as
+                    flat, not a card) plus `background: $panel` on just
+                    the label strip, one step further, for a visible
+                    header band on top of the card body.
     screens.py      DashboardScreen/NewSessionScreen/LiveRunScreen/
                     RunSummaryScreen/ConfirmModal. DashboardScreen's `b`
                     binding ("Build DAG") pushes dag_builder_screen.py's
@@ -260,6 +276,25 @@ forge/
                     _status_dot_text helper, not bare colored text, at
                     every status call site (dashboard run-status column,
                     LiveRunScreen task-status column and run-header).
+                    _status_style no longer forces bold on every colored
+                    branch (restyle follow-up — nearly every real status
+                    value is colored, so that made almost all data text
+                    heavy; color alone still carries the semantic).
+                    DataTable column widths are explicit, derived from
+                    the real AttemptStatus/RunStatus enums and
+                    NodeTypeRegistry.all_types() (_status_column_width/
+                    _node_type_column_width), not left on "auto" — an
+                    auto-width column only grows to fit what's been
+                    measured so far, and when a row's columns together
+                    exceed the table's own fractional-width panel,
+                    later columns (STATUS, specifically) could render
+                    clipped or scroll out of view entirely; STATUS is
+                    also now the column right after each table's own
+                    identifying column (TASK, RUN ID) for the same
+                    reason. Both DataTables construct with
+                    cursor_foreground_priority="renderable" so a
+                    selected row's own status color survives under the
+                    cursor instead of flattening to one CSS color.
                     Every screen's Header()/Footer siblings are now
                     chrome.py's Chrome plus panel.py's LabeledPanel
                     around the task list/trace log/chat input/DAG canvas

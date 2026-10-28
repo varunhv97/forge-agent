@@ -711,6 +711,93 @@ Commit messages hold the full history; this file is a short index.
         tests) run twice, clean both times; `black`/`ruff`/`mypy`
         (strict) all clean.
 
+- [x] **Post-M9: fix what the restyle pass above missed.** That pass's own
+      report verified against `build_inspect_report`/SVG *text content*,
+      never an actually-rendered image — which is exactly why it still
+      looked "old school" in real screenshots. This pass fixed five
+      concretely diagnosed gaps, each confirmed by exporting a headless-
+      driver SVG, converting it to PNG (`qlmanage -t`), and actually
+      looking at it before and after, not just reading the code:
+      - `forge/tui/app.py`: `ForgeApp.theme` now actually defaults to
+        `catppuccin-latte` (toggling to `catppuccin-mocha` via `t`), not
+        `textual-light`/`textual-dark` — Textual's own bland stock
+        default, never an actual theme choice. Both names confirmed
+        still registered in this Textual version via
+        `App().available_themes` before relying on them.
+      - `ForgeApp.CSS` gained `DataTable:focus > .datatable--cursor`,
+        overriding the stock cursor look (confirmed from
+        `DataTable.DEFAULT_CSS`: a full-opacity `$block-cursor-background`
+        — `$primary` at 100%, bold text by default on most themes) with
+        `background: $primary-muted` (a real token, confirmed from
+        `textual.design.ColorSystem`: `primary.blend(background, 0.7)` —
+        already the soft, accent-tinted blend this needed) and
+        `text-style: none`. Both `DataTable`s also now construct with
+        `cursor_foreground_priority="renderable"` (default is `"css"`),
+        confirmed against `DataTable._get_styles_to_render_cell`'s real
+        priority logic — without it, the CSS color would flatten a
+        selected row's own red/green status color to one flat color,
+        which is what a first pass at this looked like before actually
+        screenshotting the selected row.
+      - A real clipping bug, found and fixed: `LiveRunScreen`'s task
+        table rendered its STATUS header as "ST". Root cause (confirmed
+        empirically, not guessed): `add_column(..., width=None)` only
+        grows a column to fit what's been measured so far, and when the
+        sum of every auto-width column in a row exceeds the table's own
+        viewport (each table lives inside a fractional-width
+        `LabeledPanel`, not the whole terminal), `DataTable` doesn't wrap
+        columns to fit — NODE TYPE's uncapped width (37 characters for
+        `execution/integration_test_write_exec`) simply ate the space
+        STATUS needed. Fixed in `forge/tui/screens.py` by giving every
+        `DataTable` column an explicit width derived from the real
+        enums/registry (`_status_column_width` over `AttemptStatus`/
+        `RunStatus`, `_node_type_column_width` over
+        `NodeTypeRegistry.all_types()`, `_RUN_ID_COLUMN_WIDTH`/
+        `_UPDATED_COLUMN_WIDTH` from the real id/timestamp formats) and
+        moving STATUS to right after each row's own identifying column
+        (TASK, RUN ID) in both the live-run task table and the dashboard
+        run table, so it's the one column that's virtually always still
+        in view even when something else needs the table's own
+        horizontal scroll. Confirmed with "not_started" (13 chars, the
+        longest `AttemptStatus`/task-status value) and
+        `completed_verified`/`failed_exhausted` (the longest `RunStatus`
+        values) all rendering in full in a real screenshot.
+      - `forge/tui/panel.py`'s `LabeledPanel` had no `background` set at
+        all, so it inherited the Screen's own `$background` (see
+        `textual.screen.Screen.DEFAULT_CSS`) — every panel was the exact
+        same flat color as the page around it. Now `background: $surface`
+        (Textual's own "what text usually goes on top of" token, one
+        visible step up from `$background` on every registered theme,
+        confirmed from each `Theme`'s real hex values rather than
+        assumed) on the panel body, `background: $panel` (one step
+        further, already used by the border and by `chrome.py`) on just
+        the label strip — a visible card body plus a distinct header
+        band, in both halves of the `t` toggle.
+      - `screens.py::_status_style` dropped the `bold` it unconditionally
+        added to every green/amber/red branch — since nearly every real
+        status value matches one of those three sets, that made almost
+        all data text in the app heavy (every status cell, the run-header
+        line, the DAG canvas's per-node status line), which is what
+        actually prompted the "too uniformly bold" look a rendered
+        screenshot showed. Weight now stays reserved for genuine emphasis
+        (`DataTable` headers, the chrome title's non-bold-but-intentional
+        styling, panel labels) — color alone still carries the status
+        semantic.
+      - `dag_canvas.py` was checked, not touched: its box borders/status
+        text already derive every color from the caller's
+        `style_for_status`, so the new theme and the `_status_style`
+        weight fix both flow through automatically (confirmed in the
+        live-run graph-view screenshot) with no change to that module's
+        own rendering logic.
+      - Tests: `tests/tui/test_app.py::test_theme_defaults_light_and_
+        toggles_dark` now asserts `catppuccin-latte`/`catppuccin-mocha`
+        instead of `textual-light`/`textual-dark` — the actual new
+        default, not a cosmetic rename. `tests/tui/test_chrome.py`'s two
+        STATUS-column-index assertions moved from index 2/3 to index 1
+        in both tables, since STATUS itself moved there — deliberate,
+        not a blind "make it pass," since the column really did move.
+        Full suite (`pytest`, 323 tests) run twice, clean both times;
+        `black`/`ruff`/`mypy` (strict) all clean.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps

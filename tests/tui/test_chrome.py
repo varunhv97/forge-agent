@@ -183,7 +183,11 @@ async def test_live_run_task_status_renders_as_dot_plus_text(
         table = live_screen.query_one("#tasks-table", DataTable)
         assert table.row_count
         for row_index in range(table.row_count):
-            cell = cast(Text, table.get_row_at(row_index)[2])  # STATUS is column 2
+            # STATUS is column 1 (TASK, STATUS, NODE TYPE, ATTEMPT) — the
+            # post-M9 restyle fix-up moved it right after TASK so it's
+            # never the column a too-narrow table pushes out of view; see
+            # forge/tui/screens.py's "DataTable column widths" section.
+            cell = cast(Text, table.get_row_at(row_index)[1])
             assert cell.plain.startswith("● ")
 
         header_plain = cast(Text, live_screen.query_one("#run-header", Static).content).plain
@@ -197,7 +201,10 @@ async def test_live_run_task_status_renders_as_dot_plus_text(
         runs_table = dashboard.query_one("#runs-table", DataTable)
         assert runs_table.row_count
         for row_index in range(runs_table.row_count):
-            cell = cast(Text, runs_table.get_row_at(row_index)[3])  # STATUS is column 3
+            # STATUS is column 1 (RUN ID, STATUS, MODE, OBJECTIVE,
+            # UPDATED) — moved right after RUN ID for the same reason as
+            # the task table above.
+            cell = cast(Text, runs_table.get_row_at(row_index)[1])
             assert cell.plain.startswith("● ")
 
 

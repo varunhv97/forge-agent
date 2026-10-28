@@ -45,9 +45,11 @@ from forge.cli import (
     compute_run_list,
     compute_trace_entries,
 )
+from forge.controller.node_registry import NodeTypeRegistry
 from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
-from forge.models.attempt import Attempt
+from forge.models.attempt import Attempt, AttemptStatus
+from forge.models.run import RunStatus
 from forge.modes.custom_dag import CustomDagError, DagTemplateInfo
 from forge.tui.chrome import Chrome
 from forge.tui.dag_builder_screen import DagBuilderScreen
@@ -71,12 +73,22 @@ def _get_app(screen: Screen[Any]) -> ForgeApp:
 
 
 def _status_style(colors: Mapping[str, str], status: str) -> str:
+    # No `bold` here (a prior restyle pass had it on every branch): since
+    # almost every real status value matches one of these three sets, that
+    # made nearly all data text in the app heavy — every task/run status
+    # cell, the run-header line, and the DAG canvas's per-node status line
+    # all went bold just for being colored. Color alone already carries
+    # the semantic (green/amber/red); weight is reserved for genuine
+    # emphasis (headers, the chrome title, panel labels — see
+    # `chrome.py`/`panel.py`), not routine data coloring. Confirmed by
+    # actually looking at a rendered screenshot before this change, not
+    # guessed.
     if status in _GREEN_STATUSES:
-        return f"bold {colors.get('success', 'green')}"
+        return colors.get("success", "green")
     if status in _AMBER_STATUSES:
-        return f"bold {colors.get('warning', 'yellow')}"
+        return colors.get("warning", "yellow")
     if status in _RED_STATUSES:
-        return f"bold {colors.get('error', 'red')}"
+        return colors.get("error", "red")
     return ""
 
 
@@ -118,6 +130,71 @@ def _task_duration(attempt: Attempt | None) -> str:
         return "-"
     end = attempt.finished_at or datetime.now(UTC)
     return _fmt_elapsed(end - attempt.started_at)
+
+
+# -- DataTable column widths ---------------------------------------------------
+#
+# A real clipping bug this fixes: `DataTable.add_column(..., width=None)`
+# (the default, "auto") only ever grows a column to fit whatever's been
+# measured *so far* — fine in isolation, but when the sum of every
+# auto-width column in a row exceeds the table's own viewport (each
+# table here lives inside a `LabeledPanel` that's a fraction of the
+# screen's width, not the whole terminal), `DataTable` doesn't wrap or
+# shrink columns to fit; it just doesn't scroll the later ones into view
+# at all, so a column past that point can render as short as its first
+# couple of characters (confirmed with a headless-driver screenshot: the
+# live-run task table's STATUS header rendered as "ST", with the whole
+# ATTEMPT column not visible at all, because NODE TYPE's own uncapped
+# auto-width — "execution/integration_test_write_exec" is 37 characters —
+# ate the rest of the row's space before STATUS). The fix has two parts:
+# an explicit width on every column (so none can balloon unpredictably,
+# and an auto-width header is never left at just its own un-measured
+# width before any row's data arrives), and putting STATUS right after
+# the row's own identifying column, so it's the one column that's
+# virtually always still in view even when something else needs the
+# table's own horizontal scroll. Widths are derived from the real
+# enums/registry below, not guessed, so they stay correct if a status
+# value or node type is ever added/renamed.
+_TASK_STATUS_VALUES = [status.value for status in AttemptStatus] + ["not_started"]
+_RUN_STATUS_VALUES = [status.value for status in RunStatus]
+
+
+def _status_column_width(values: list[str], header: str) -> int:
+    """`len("● " + longest value)` — exactly what `_status_dot_text`
+    renders — or the header's own width if that's somehow longer."""
+    content_width = max(len(f"● {value}") for value in values)
+    return max(content_width, len(header))
+
+
+_TASK_STATUS_COLUMN_WIDTH = _status_column_width(_TASK_STATUS_VALUES, "STATUS")
+_RUN_STATUS_COLUMN_WIDTH = _status_column_width(_RUN_STATUS_VALUES, "STATUS")
+
+# `forge/controller/scheduler.py::new_id("run")` always produces
+# "run-" plus 12 hex characters — a fixed, real format, not a guess.
+_RUN_ID_COLUMN_WIDTH = len("run-") + 12
+# `_fmt_dt` always calls `isoformat(timespec="seconds")` on a
+# timezone-aware datetime, which is always exactly this many characters.
+_UPDATED_COLUMN_WIDTH = len("2026-01-01T00:00:00+00:00")
+_ATTEMPT_COLUMN_WIDTH = len("ATTEMPT")  # "#12"-style content is always shorter
+# Task ids are authored per-DAG (built-in chains and custom templates
+# alike), so there's no closed set to measure like the enums above; this
+# comfortably fits every built-in chain's ids ("integration_verify" is
+# the longest, at 19). A custom DAG's much longer id just truncates in
+# this column — the same tradeoff an unusually long node type name makes
+# against `_node_type_column_width` below — never the table's STATUS
+# column, which this whole fix exists to protect.
+_TASK_ID_COLUMN_WIDTH = 20
+
+
+def _node_type_column_width(node_registry: NodeTypeRegistry) -> int:
+    """`len("<kind>/<name>")` for the widest *actually registered* node
+    type — real registry data, exactly what `refresh_run` renders in this
+    column, not an estimate, so a newly registered node type with a long
+    name still renders in full rather than silently clipping."""
+    widths = [
+        len(f"{node_type.kind.value}/{node_type.name}") for node_type in node_registry.all_types()
+    ]
+    return max([*widths, len("NODE TYPE")])
 
 
 def _minimap_bar(offset: int, viewport: int, total: int, width: int = 24) -> str:
@@ -243,7 +320,18 @@ class DashboardScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Chrome(title="forge")
         with LabeledPanel("RUNS", id="runs-panel"):
-            yield DataTable(id="runs-table", cursor_type="row")
+            # `cursor_foreground_priority="renderable"` (the default is
+            # "css") so the selected row's own `_status_dot_text` color
+            # (red/amber/green) stays visible under the soft cursor
+            # background from `ForgeApp.CSS` instead of every cell's text
+            # flattening to one color the moment it's selected —
+            # confirmed against `DataTable._get_styles_to_render_cell`'s
+            # real priority logic for this installed version, not
+            # assumed. An uncolored cell (e.g. RUN ID) still falls back
+            # to that CSS rule's own `color: $text`.
+            yield DataTable(
+                id="runs-table", cursor_type="row", cursor_foreground_priority="renderable"
+            )
             yield Static("no runs yet", id="empty-state")
         yield Footer()
 
@@ -251,7 +339,19 @@ class DashboardScreen(Screen[None]):
         app = _get_app(self)
         self.query_one(Chrome).set_title(f"forge — {app.repo_root.name}")
         table = self.query_one("#runs-table", DataTable)
-        table.add_columns("RUN ID", "MODE", "OBJECTIVE", "STATUS", "UPDATED")
+        # STATUS right after RUN ID (not its original position after
+        # OBJECTIVE), with explicit widths on every column whose content
+        # has a known real shape — see the "DataTable column widths"
+        # section above for why this is the actual clipping fix, not
+        # just a cosmetic reorder. MODE/OBJECTIVE are free text (a
+        # request's own objective, or a custom DAG template's name) with
+        # no closed set to measure, so they stay auto-width, same as
+        # before.
+        table.add_column("RUN ID", width=_RUN_ID_COLUMN_WIDTH)
+        table.add_column("STATUS", width=_RUN_STATUS_COLUMN_WIDTH)
+        table.add_column("MODE")
+        table.add_column("OBJECTIVE")
+        table.add_column("UPDATED", width=_UPDATED_COLUMN_WIDTH)
         table.focus()
         self.query_one("#empty-state", Static).display = False
         self.refresh_runs()
@@ -268,9 +368,9 @@ class DashboardScreen(Screen[None]):
         for entry in entries:
             table.add_row(
                 entry.id,
+                _status_dot_text(colors, entry.status.value),
                 entry.mode,
                 entry.objective,
-                _status_dot_text(colors, entry.status.value),
                 _fmt_dt(entry.updated_at),
                 key=entry.id,
             )
@@ -607,7 +707,11 @@ class LiveRunScreen(Screen[None]):
         yield Static("", id="run-header")
         with Horizontal(id="list-view"):
             with LabeledPanel("TASKS", id="tasks-panel"):
-                yield DataTable(id="tasks-table", cursor_type="row")
+                # Same `cursor_foreground_priority` reasoning as
+                # DashboardScreen's runs-table above.
+                yield DataTable(
+                    id="tasks-table", cursor_type="row", cursor_foreground_priority="renderable"
+                )
             with LabeledPanel("TRACE", id="trace-panel"):
                 yield RichLog(id="trace-log", wrap=True, highlight=False, markup=False)
         with LabeledPanel("GRAPH", id="graph-panel"):
@@ -620,7 +724,14 @@ class LiveRunScreen(Screen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#tasks-table", DataTable)
-        table.add_columns("TASK", "NODE TYPE", "STATUS", "ATTEMPT")
+        # Same fix, same reasoning, as `DashboardScreen.on_mount` above:
+        # STATUS right after TASK (not after NODE TYPE), explicit widths
+        # everywhere there's a real shape to measure — this is the column
+        # that used to render as a clipped "ST" header.
+        table.add_column("TASK", width=_TASK_ID_COLUMN_WIDTH)
+        table.add_column("STATUS", width=_TASK_STATUS_COLUMN_WIDTH)
+        table.add_column("NODE TYPE", width=_node_type_column_width(_get_app(self).node_registry))
+        table.add_column("ATTEMPT", width=_ATTEMPT_COLUMN_WIDTH)
         table.focus()
         self.query_one("#graph-panel").display = False
         self.query_one("#graph-view").display = False
@@ -669,8 +780,8 @@ class LiveRunScreen(Screen[None]):
             attempt_label = f"#{attempt.attempt_number}" if attempt is not None else "-"
             table.add_row(
                 task.id,
-                f"{task.node_kind.value}/{task.node_type}",
                 _status_dot_text(colors, status),
+                f"{task.node_kind.value}/{task.node_type}",
                 attempt_label,
             )
         if table.row_count:

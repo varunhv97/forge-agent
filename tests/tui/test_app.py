@@ -212,17 +212,22 @@ async def test_custom_dag_run_goes_live_then_completes(
 async def test_theme_defaults_light_and_toggles_dark(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
+    # catppuccin-latte/catppuccin-mocha, not textual-light/textual-dark —
+    # this restyle pass's actual default-theme fix (see tasks.md's
+    # "restyle follow-up" entry). Confirmed registered in this installed
+    # Textual version via `App().available_themes` before relying on it
+    # here.
     monkeypatch.chdir(git_repo)
     project.ensure_forge_dir(git_repo)
 
     app = ForgeApp()
     async with app.run_test() as pilot:
         await _wait_until(lambda: isinstance(app.screen, NewSessionScreen))
-        assert app.theme == "textual-light"
+        assert app.theme == "catppuccin-latte"
         await pilot.press("t")
-        assert app.theme == "textual-dark"
+        assert app.theme == "catppuccin-mocha"
         await pilot.press("t")
-        assert app.theme == "textual-light"
+        assert app.theme == "catppuccin-latte"
 
 
 # -- live run: DAG view toggle -------------------------------------------------
