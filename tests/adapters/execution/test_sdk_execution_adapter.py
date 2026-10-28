@@ -177,6 +177,37 @@ def test_build_claude_agent_options_strips_bash_patterns_to_plain_tool_names():
     assert options.allowed_tools == ["Bash", "Read"]
 
 
+def test_build_claude_agent_options_sets_effort_when_given():
+    """
+    The real correction this feature's own investigation surfaced:
+    `ClaudeAgentOptions.effort` is its own top-level field (confirmed from
+    `claude_agent_sdk.types` directly), entirely separate from `thinking`
+    — there is no `effort` key nested inside `ThinkingConfig`. This is the
+    one test proving Forge's own `EffortLevel` value actually lands on
+    that field.
+    """
+    options = build_claude_agent_options(
+        profile=_profile(), worktree_path="/tmp/wt-1", model="claude-sonnet-5", effort="high"
+    )
+    assert options.effort == "high"
+    # Setting effort must never implicitly touch thinking — they're
+    # independent fields on the real SDK type.
+    assert options.thinking is None
+
+
+def test_build_claude_agent_options_leaves_effort_unset_by_default():
+    """
+    No `effort` argument at all (the default, and what every call site
+    outside this feature's own new code path uses) must leave
+    `ClaudeAgentOptions.effort` exactly as it was before this feature
+    existed: unset, so the model's own default behavior applies.
+    """
+    options = build_claude_agent_options(
+        profile=_profile(), worktree_path="/tmp/wt-1", model="claude-sonnet-5"
+    )
+    assert options.effort is None
+
+
 def test_build_claude_agent_options_registers_one_pretooluse_matcher():
     options = build_claude_agent_options(
         profile=_profile(), worktree_path="/tmp/wt-1", model="claude-sonnet-5"

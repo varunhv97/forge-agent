@@ -8,11 +8,12 @@ from forge.controller.model_registry import (
     ModelRegistry,
     NoDefaultModelConfiguredError,
     UnknownModelError,
+    select_effort,
     select_model,
 )
 from forge.controller.node_registry import NodeType
 from forge.models.attempt import Attempt, AttemptStatus
-from forge.models.common import NodeKind
+from forge.models.common import EffortLevel, NodeKind
 from forge.models.model_registry import ModelCapability
 
 
@@ -24,6 +25,8 @@ def _node_type(
     name: str = "coder",
     default_model: str | None = "claude-sonnet-5",
     escalation_model: str | None = "claude-opus-5",
+    default_effort: EffortLevel | None = None,
+    escalation_effort: EffortLevel | None = None,
 ) -> NodeType:
     return NodeType(
         name=name,
@@ -33,6 +36,8 @@ def _node_type(
         permission_profile="default",
         default_model=default_model,
         escalation_model=escalation_model,
+        default_effort=default_effort,
+        escalation_effort=escalation_effort,
     )
 
 
@@ -147,3 +152,65 @@ class TestSelectModel:
         node_type = _node_type(default_model=None, escalation_model=None)
         with pytest.raises(NoDefaultModelConfiguredError):
             select_model("task-1", node_type, attempts=[])
+
+
+class TestSelectEffort:
+    """
+    Mirrors TestSelectModel's cases exactly, since select_effort shares
+    the identical failure-count policy (select_model/select_effort both
+    build on the same _prior_failures helper) — the one behavioral
+    difference is what happens when nothing is configured at all: no
+    default_model is an error (NoDefaultModelConfiguredError), but no
+    default_effort is a perfectly normal, common case that just means
+    "don't override effort," so it returns None rather than raising.
+    """
+
+    def test_no_default_effort_configured_returns_none(self) -> None:
+        node_type = _node_type()  # default_effort/escalation_effort both None
+        assert select_effort("task-1", node_type, attempts=[]) is None
+
+    def test_zero_failures_returns_default_effort(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        assert select_effort("task-1", node_type, attempts=[]) == "high"
+
+    def test_exactly_one_failure_still_returns_default_effort(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [_attempt("task-1", AttemptStatus.FAILED)]
+        assert select_effort("task-1", node_type, attempts) == "high"
+
+    def test_two_failures_escalates(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [
+            _attempt("task-1", AttemptStatus.FAILED, attempt_number=1),
+            _attempt("task-1", AttemptStatus.FAILED, attempt_number=2),
+        ]
+        assert select_effort("task-1", node_type, attempts) == "max"
+
+    def test_three_failures_still_escalates(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [_attempt("task-1", AttemptStatus.FAILED, attempt_number=n) for n in range(1, 4)]
+        assert select_effort("task-1", node_type, attempts) == "max"
+
+    def test_failures_for_other_tasks_are_not_counted(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [
+            _attempt("other-task", AttemptStatus.FAILED, attempt_number=1),
+            _attempt("other-task", AttemptStatus.FAILED, attempt_number=2),
+        ]
+        assert select_effort("task-1", node_type, attempts) == "high"
+
+    def test_non_failed_attempts_are_not_counted(self) -> None:
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [
+            _attempt("task-1", AttemptStatus.PASSED, attempt_number=1),
+            _attempt("task-1", AttemptStatus.RUNNING, attempt_number=2),
+        ]
+        assert select_effort("task-1", node_type, attempts) == "high"
+
+    def test_two_failures_with_no_escalation_effort_falls_back_to_default(self) -> None:
+        node_type = _node_type(default_effort="medium", escalation_effort=None)
+        attempts = [
+            _attempt("task-1", AttemptStatus.FAILED, attempt_number=1),
+            _attempt("task-1", AttemptStatus.FAILED, attempt_number=2),
+        ]
+        assert select_effort("task-1", node_type, attempts) == "medium"

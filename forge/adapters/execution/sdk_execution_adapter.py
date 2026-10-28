@@ -22,6 +22,7 @@ from forge.isolation.hooks import (
     ToolCallEvent,
     build_pretooluse_hook,
 )
+from forge.models.common import EffortLevel
 from forge.models.permissions import PermissionProfile
 
 # Per built-in tool, which key in its `tool_input` dict holds the file path
@@ -121,6 +122,7 @@ def build_claude_agent_options(
     model: str,
     max_turns: int | None = None,
     decision_log: list[DecisionLogEntry] | None = None,
+    effort: EffortLevel | None = None,
 ) -> ClaudeAgentOptions:
     """
     Builds the `ClaudeAgentOptions` for one execution attempt: scoped to its
@@ -133,6 +135,22 @@ def build_claude_agent_options(
     before `permission_mode` or `allowed_tools` are even consulted, which is
     exactly the property this project's enforcement story depends on. The
     task's own prompt is never trusted to stay within `profile` on its own.
+
+    `effort`, when given, is passed straight through to the real SDK's own
+    `ClaudeAgentOptions.effort` field. This is a deliberate correction of
+    an initial assumption going into this feature (that effort lived
+    *inside* `ClaudeAgentOptions.thinking: ThinkingConfig`) — confirmed
+    false by reading `claude_agent_sdk.types` directly:
+    `ClaudeAgentOptions.effort: EffortLevel | None` is its own top-level
+    field, entirely separate from `thinking` (which only ever controls
+    adaptive/fixed-budget/disabled extended thinking, with no `effort`
+    sub-key at all). The SDK's own `EffortLevel` is
+    `Literal["low", "medium", "high", "xhigh", "max"]` — exactly
+    `forge.models.common.EffortLevel`'s literal values, so this is a
+    trivial identity mapping, not a translation into a different shape.
+    `thinking` itself is untouched here; with `effort=None` (no
+    `default_effort` configured for the node type), this call is
+    byte-for-byte what it was before this feature existed.
     """
     policy = build_pretooluse_hook(profile, worktree_path)
     callback = make_pretooluse_hook_callback(policy, decision_log=decision_log)
@@ -150,6 +168,7 @@ def build_claude_agent_options(
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[callback])]},
         model=model,
         max_turns=max_turns,
+        effort=effort,
     )
 
 
@@ -235,6 +254,7 @@ async def run_execution_attempt(
     model: str,
     max_turns: int | None = None,
     chat_queue: queue.Queue[str] | None = None,
+    effort: EffortLevel | None = None,
 ) -> ExecutionResult:
     """
     Runs one execution node's prompt through a live Claude Agent SDK
@@ -269,6 +289,12 @@ async def run_execution_attempt(
     allowed to replace whatever the receive loop itself produced — chat is
     additive to the attempt, never a way for it to fail.
 
+    `effort`, when given, is forwarded to `build_claude_agent_options` and
+    ends up on the real `ClaudeAgentOptions.effort` field — see that
+    function's docstring for why this is `effort`, not `thinking`. `None`
+    (the default) leaves `ClaudeAgentOptions.effort` unset, same as before
+    this parameter existed.
+
     This makes a real call to the Anthropic API via the bundled Claude Code
     CLI subprocess and therefore requires network access and either
     `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session, which is
@@ -288,6 +314,7 @@ async def run_execution_attempt(
         model=model,
         max_turns=max_turns,
         decision_log=decision_log,
+        effort=effort,
     )
     messages: list[Any] = []
     client = ClaudeSDKClient(options=options)

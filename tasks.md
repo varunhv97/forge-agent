@@ -798,6 +798,133 @@ Commit messages hold the full history; this file is a short index.
         Full suite (`pytest`, 323 tests) run twice, clean both times;
         `black`/`ruff`/`mypy` (strict) all clean.
 
+- [x] **Post-M9: effort-level customization, phase 1 of 4 (model/effort
+      selection, wired through EXECUTION dispatch).** The first phase of a
+      four-phase model/effort customization arc; the other three
+      (custom-DAG per-task overrides, a live trace window into the running
+      session, in-place interrupt-and-resume model/effort swapping) are
+      discussed but not yet built.
+      - Confirmed from `claude_agent_sdk.types` directly rather than a
+        secondhand description: `EffortLevel = Literal["low", "medium",
+        "high", "xhigh", "max"]`, and — the real finding here —
+        `ClaudeAgentOptions.effort: EffortLevel | None` is its own
+        top-level field, entirely separate from `ClaudeAgentOptions.
+        thinking: ThinkingConfig | None` (which only ever controls
+        adaptive/fixed-budget/disabled extended thinking; there is no
+        `effort` key nested inside it). The initial plan going into this
+        work assumed effort lived inside `thinking` — that assumption was
+        wrong, confirmed by reading the real source, and the
+        implementation below sets `effort=` directly, not `thinking=`.
+      - `forge/models/common.py` gained Forge's own `EffortLevel` — the
+        identical `Literal["low", "medium", "high", "xhigh", "max"]`, but
+        defined here rather than imported from `claude_agent_sdk`, so
+        `forge/models/*`/`forge/controller/*` still have no dependency on
+        that package at all (only `forge/adapters/execution/*` does).
+      - `NodeType` (`forge/controller/node_registry.py`) gained
+        `default_effort`/`escalation_effort: EffortLevel | None = None`,
+        mirroring `default_model`/`escalation_model`'s optionality exactly
+        — with one deliberate difference: a node type is allowed to
+        configure no effort at all (not an error, unlike having no
+        `default_model`), in which case no `effort` override is set and
+        the model's own default behavior applies.
+      - `forge/controller/model_registry.py` gained `select_effort`, a
+        separate function alongside `select_model` rather than one
+        combined function/return type: the two policies share the exact
+        same failure-count shape (both now built on a shared
+        `_prior_failures` helper, extracted so they can't silently drift
+        apart), but their "nothing configured" behavior differs in a way
+        that's awkward to express as one return type — `select_model`
+        must raise `NoDefaultModelConfiguredError` when unconfigured,
+        while `select_effort` returning `None` for "unconfigured" is the
+        normal, common case. Keeping them separate keeps each function's
+        error semantics simple.
+      - Set on every currently-registered EXECUTION node type
+        (`forge/nodes/*.py`), each with its own stated reasoning:
+        `implement_exec` (`default_effort="high"`,
+        `escalation_effort="max"`) writes the actual feature code this
+        project exists to produce — the highest-stakes, most open-ended
+        work in the pipeline, warranting deep reasoning from the first
+        attempt and the most expensive setting once that's demonstrably
+        not enough. `integration_test_write_exec`
+        (`default_effort="medium"`, `escalation_effort="high"`) needs real
+        reasoning about how several merged pieces of work interact, but
+        it's a narrower, better-scoped writing task than full feature
+        implementation. `manual_test_exec` (`default_effort="low"`,
+        `escalation_effort="medium"`) follows an already tightly specified
+        recipe (run a Playwright script, take screenshots, report a
+        verdict to a fixed file) — the smaller, more mechanical judgment
+        call among this project's EXECUTION node types, so low effort
+        suffices by default; escalation buys more careful observation, not
+        deeper architectural reasoning this node never needed. MECHANICAL
+        node types (`unit_verify_exec`, `integration_verify_exec`,
+        `deploy_exec`) get no effort fields, same as they get no model
+        fields today — they never call a model at all.
+      - Threaded through dispatch, following the exact precedent
+        `chat_queue` set in the mid-run-chat work, with one correction:
+        that precedent turned out to be "add a keyword-only parameter to
+        the concrete runner functions, not to the `ExecutionRunner` type
+        itself" (`chat_queue` never touched `execution_registry.py` or
+        `dispatch_execution_attempt`'s call signature at all — confirmed
+        by re-checking that commit's actual diff). Effort can't follow
+        that exact shape, because unlike chat it has to be *decided* by
+        the scheduler (from `NodeType` + attempt history) and *handed to*
+        whichever runner is configured — so `ExecutionRunner`
+        (`forge/controller/execution_registry.py`) is now a `Protocol`
+        with a keyword-only `effort: EffortLevel | None = None` parameter
+        on its `__call__`, rather than the plain `Callable[[...], ...]`
+        alias it was (which can't express a keyword-only parameter at
+        all) — the same `Protocol`-for-an-injected-callable shape
+        `DispatchRetryFn` in `decisions.py` already uses.
+        `dispatch_execution_attempt` (`scheduler.py`) calls `select_effort`
+        right alongside building the prompt and passes the result to
+        `execution_runner(..., effort=effort)` on every dispatch (fresh
+        attempts and decision-driven retries/escalations alike, since
+        `select_effort` is recomputed from each dispatch's own attempt
+        history). `run_sdk_node` (`sdk_node_runner.py`) and `RunWorker.
+        _run_sdk_node_with_chat` (`forge/tui/runner.py`) both gained the
+        same keyword-only `effort` parameter, forwarding it straight
+        through — neither has any effort logic of its own.
+      - `sdk_execution_adapter.py`'s `build_claude_agent_options` gained
+        the same keyword-only `effort`, setting `ClaudeAgentOptions.
+        effort=effort` directly (a trivial identity mapping, both sides
+        being the same `Literal[...]` values) — `thinking` is untouched.
+        `run_execution_attempt` forwards it through unchanged. With
+        `effort=None` (no `default_effort` configured, true for every
+        MECHANICAL node type and any EXECUTION one that doesn't set it),
+        this is byte-for-byte what `ClaudeAgentOptions` construction
+        looked like before this feature existed.
+      - Tests: `TestSelectEffort` in `tests/controller/test_model_registry.py`
+        mirrors `TestSelectModel`'s cases exactly (0/1 failures stay on
+        default, 2+ escalate, other tasks'/non-FAILED attempts don't
+        count, no escalation configured falls back to default) plus the
+        one divergent case, no default configured at all returning `None`
+        rather than raising. `tests/adapters/execution/
+        test_sdk_execution_adapter.py` gained a test that `effort=` on
+        `build_claude_agent_options` lands on `options.effort` (and leaves
+        `options.thinking` untouched) and a test that no `effort` argument
+        leaves it unset. `tests/adapters/execution/test_sdk_node_runner.py`
+        gained the forwarding-through tests (default `None`, an explicit
+        value) on the same pattern as the existing `chat_queue` ones.
+        `tests/controller/test_execution_dispatch.py` gained
+        `test_mechanical_attempt_never_reaches_an_effort_aware_execution_
+        runner`: a capturing `execution_runner` fake proves it's called
+        exactly once, for `implement_exec`, with its real registered
+        `effort=="high"` — never for the MECHANICAL `unit_verify_exec` at
+        all, which keeps `model_used == "mechanical"` same as before this
+        feature existed. Every other `execution_runner` test fake across
+        the suite (`tests/controller/test_execution_dispatch.py`,
+        `tests/cli/test_run_resume_list.py`, `tests/tui/conftest.py`,
+        `tests/tui/test_runner.py`, `tests/tui/test_chat.py`) gained the
+        same keyword-only `effort` parameter `ExecutionRunner`'s new
+        `Protocol` shape requires, mirroring how each already accepted
+        `chat_queue`. Full suite (`pytest`, 336 tests) run twice, clean
+        both times; `black`/`ruff`/`mypy` (strict) all clean.
+      - **Not done, explicitly out of scope for this phase:** the Codex
+        adapter (Codex-side effort support is a separate, later decision);
+        custom-DAG per-task effort overrides (`forge/modes/custom_dag.py`,
+        the next phase); the TUI's trace display; any interrupt/resume
+        mechanism.
+
 Everything after M9 is backlog. See `requirements.md`.
 
 ## Known gaps

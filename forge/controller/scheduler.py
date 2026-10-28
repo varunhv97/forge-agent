@@ -51,7 +51,7 @@ from forge.controller.decision_dispatch import (
 from forge.controller.decisions import RejectedProposalError, apply_decision
 from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunner
 from forge.controller.mechanical import MechanicalContext, MechanicalRunnerRegistry
-from forge.controller.model_registry import ModelRegistry
+from forge.controller.model_registry import ModelRegistry, select_effort
 from forge.controller.node_registry import (
     NodeType,
     NodeTypeRegistry,
@@ -498,7 +498,13 @@ def dispatch_execution_attempt(
     input_data = handlers.build_input(task, request, upstream_outputs)
     prompt = handlers.build_prompt(input_data)
 
-    outcome = execution_runner(model, prompt, profile, worktree.worktree_path)
+    # Same failure-count policy as model selection, computed fresh on every
+    # dispatch (initial attempt or a decision-driven retry/escalation) from
+    # this task's own attempt history — None whenever node_type configures
+    # no default_effort at all, which every runner treats as "don't
+    # override effort for this call."
+    effort = select_effort(task.id, node_type, attempts)
+    outcome = execution_runner(model, prompt, profile, worktree.worktree_path, effort=effort)
 
     passed = False
     summary = outcome.summary

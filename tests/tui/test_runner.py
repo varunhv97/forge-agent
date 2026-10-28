@@ -22,6 +22,7 @@ from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRe
 from forge.controller.scheduler import start_run
 from forge.controller.store import Store
 from forge.controller.validator import compile_and_validate
+from forge.models.common import EffortLevel
 from forge.models.permissions import Budgets
 from forge.models.run import RunStatus
 from forge.modes.custom_dag import build_custom_dag_request_and_graph
@@ -131,6 +132,7 @@ def test_active_chat_queue_is_set_only_for_the_execution_task_and_cleared_after(
         worktree_path: str,
         *,
         chat_queue: queue.Queue[str] | None = None,
+        effort: EffortLevel | None = None,
     ) -> ExecutionRunOutcome:
         seen_chat_queues.append(chat_queue)
         return fake_execution_runner(model, prompt, profile, worktree_path, chat_queue=chat_queue)
@@ -173,6 +175,7 @@ def test_message_put_on_active_chat_queue_reaches_the_in_flight_attempt(
         worktree_path: str,
         *,
         chat_queue: queue.Queue[str] | None = None,
+        effort: EffortLevel | None = None,
     ) -> ExecutionRunOutcome:
         if chat_queue is not None:
             with contextlib.suppress(queue.Empty):

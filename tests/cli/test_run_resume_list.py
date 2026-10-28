@@ -78,7 +78,9 @@ def _write_dag(repo_root: Path, name: str = "implement-and-verify") -> None:
     (dags_dir / f"{name}.json").write_text(json.dumps(_DAG_DEFINITION))
 
 
-def _fake_execution_runner(model, prompt, profile, worktree_path) -> ExecutionRunOutcome:
+def _fake_execution_runner(
+    model, prompt, profile, worktree_path, *, effort=None
+) -> ExecutionRunOutcome:
     """
     Stands in for a real `claude` CLI session the same way
     tests/controller/test_execution_dispatch.py's fakes do: writes real

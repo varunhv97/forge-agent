@@ -105,6 +105,16 @@ def build_prompt(input: ManualTestInput) -> str:
     return "\n".join(lines)
 
 
+# manual_test_exec's own prompt (see build_prompt above) is already a
+# tightly specified recipe — write a Playwright script, drive it step by
+# step, take screenshots, report a verdict to a fixed file — the smaller,
+# more mechanical judgment call this project's other EXECUTION node types
+# are not: there's no design/implementation space to explore, just a
+# known procedure to follow and an honest pass/fail call to make at the
+# end. "low" is enough by default; "medium" (not "high"/"max") on
+# escalation buys more careful observation of what's actually happening
+# in the browser after a wrong verdict, not deeper architectural
+# reasoning this node was never doing in the first place.
 MANUAL_TEST_EXEC = NodeType(
     name="manual_test_exec",
     kind=NodeKind.EXECUTION,
@@ -115,4 +125,6 @@ MANUAL_TEST_EXEC = NodeType(
     default_model="claude-sonnet-5",
     escalation_model="claude-opus-5",
     output_strategy="result_file",
+    default_effort="low",
+    escalation_effort="medium",
 )

@@ -49,7 +49,9 @@ def _registries():
     return node_registry, permission_registry, mechanical_registry, execution_handler_registry
 
 
-def _writes_a_passing_test_without_committing(model, prompt, profile, worktree_path):
+def _writes_a_passing_test_without_committing(
+    model, prompt, profile, worktree_path, *, effort=None
+):
     """
     Simulates an SDK session that wrote real work but didn't commit it
     itself — exercising dispatch_execution_attempt's auto-commit safety
@@ -59,15 +61,15 @@ def _writes_a_passing_test_without_committing(model, prompt, profile, worktree_p
     return ExecutionRunOutcome(completed=True, summary="wrote a test")
 
 
-def _does_nothing(model, prompt, profile, worktree_path):
+def _does_nothing(model, prompt, profile, worktree_path, *, effort=None):
     return ExecutionRunOutcome(completed=True, summary="did nothing")
 
 
-def _fails_outright(model, prompt, profile, worktree_path):
+def _fails_outright(model, prompt, profile, worktree_path, *, effort=None):
     return ExecutionRunOutcome(completed=False, summary="simulated adapter failure")
 
 
-def _writes_a_passing_test_with_session_id(model, prompt, profile, worktree_path):
+def _writes_a_passing_test_with_session_id(model, prompt, profile, worktree_path, *, effort=None):
     """Same shape as `_writes_a_passing_test_without_committing`, but with a
     real-looking Claude Agent SDK session id attached, the way `run_sdk_node`
     reports one for a real session."""
@@ -241,6 +243,72 @@ def test_implement_exec_with_no_changes_fails(store: Store, repo_root: Path):
     attempt = store.load_attempts(run.id)[0]
     assert attempt.status == AttemptStatus.FAILED
     assert "no changes" in (attempt.failure_summary or "").lower()
+
+
+def test_mechanical_attempt_never_reaches_an_effort_aware_execution_runner(
+    store: Store, repo_root: Path
+):
+    """
+    implement_exec (EXECUTION) is registered with a real default_effort
+    ("high", see forge/nodes/implement_exec.py); unit_verify_exec
+    (MECHANICAL) has none at all and never goes through
+    dispatch_execution_attempt in the first place. A capturing
+    execution_runner proves both halves at once: it's called exactly once
+    (for implement_exec, with effort=="high"), never for unit_verify_exec
+    — a MECHANICAL attempt is completely unaffected by this feature, the
+    same as it never had a model_used override before it existed.
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+    calls: list[tuple[str, object]] = []
+
+    def _capturing_runner(model, prompt, profile, worktree_path, *, effort=None):
+        calls.append((model, effort))
+        return _writes_a_passing_test_without_committing(
+            model, prompt, profile, worktree_path, effort=effort
+        )
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=ModelRegistry([]),
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_capturing_runner,
+        repo_root=repo_root,
+    )
+
+    from tests.conftest import make_graph, make_request, make_task
+
+    criterion = AcceptanceCriterion(
+        id="c1", description="unit tests pass", verification_method="automated_test"
+    )
+    req = make_request(acceptance_criteria=[criterion])
+    t1 = make_task(
+        "t1",
+        node_type="implement_exec",
+        node_kind=NodeKind.EXECUTION,
+        permission_profile="code_edit_default",
+    )
+    t2 = make_task(
+        "t2",
+        node_type="unit_verify_exec",
+        node_kind=NodeKind.MECHANICAL,
+        depends_on=["t1"],
+        acceptance_criterion_ids=["c1"],
+        permission_profile="mechanical_default",
+    )
+    graph = make_graph([t1, t2])
+
+    run = start_run(req, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.COMPLETED_VERIFIED
+    assert calls == [("claude-sonnet-5", "high")]
+
+    attempts = {a.task_id: a for a in store.load_attempts(run.id)}
+    assert attempts["t2"].model_used == "mechanical"
 
 
 def test_execution_runner_failure_is_recorded_as_failed_attempt(store: Store, repo_root: Path):

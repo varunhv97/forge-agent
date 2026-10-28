@@ -5,6 +5,7 @@ import queue
 
 from forge.adapters.execution.sdk_execution_adapter import run_execution_attempt
 from forge.controller.execution_registry import ExecutionRunOutcome
+from forge.models.common import EffortLevel
 from forge.models.permissions import PermissionProfile
 
 
@@ -15,6 +16,7 @@ def run_sdk_node(
     worktree_path: str,
     *,
     chat_queue: queue.Queue[str] | None = None,
+    effort: EffortLevel | None = None,
 ) -> ExecutionRunOutcome:
     """
     Bridges the scheduler's synchronous `ExecutionRunner` contract to the
@@ -33,6 +35,11 @@ def run_sdk_node(
     only thing every caller outside the TUI ever passes) behaves exactly
     as before this parameter existed.
 
+    `effort`, when given, is handed straight through to
+    `run_execution_attempt` too, keyword-only and `None` by default, same
+    shape as `chat_queue` — the scheduler's `select_effort` is what
+    actually decides the value; this bridge just forwards it unchanged.
+
     `ExecutionRunOutcome.session_id` is threaded straight through from
     `result.session_id` (the real Claude Agent SDK session id off the
     turn's terminal `ResultMessage`, or `None` if there wasn't one) — this
@@ -47,6 +54,7 @@ def run_sdk_node(
                 worktree_path=worktree_path,
                 model=model,
                 chat_queue=chat_queue,
+                effort=effort,
             )
         )
     except Exception as exc:  # noqa: BLE001 - any adapter failure is a failed attempt, by contract

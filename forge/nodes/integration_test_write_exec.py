@@ -98,6 +98,14 @@ def build_prompt(input: IntegrationTestWriteInput) -> str:
     return "\n".join(lines)
 
 
+# Writing integration tests needs real reasoning about how several merged
+# pieces of work interact — more than a mechanical check, but a narrower,
+# better-scoped task than implement_exec's open-ended feature work (it's
+# reading and testing against code that already exists, not designing new
+# behavior from a description). "medium" by default, "high" (not "max")
+# on escalation: a tougher look at the same interactions, not a leap to
+# the most expensive setting for what's still fundamentally a bounded
+# writing task.
 INTEGRATION_TEST_WRITE_EXEC = NodeType(
     name="integration_test_write_exec",
     kind=NodeKind.EXECUTION,
@@ -107,4 +115,6 @@ INTEGRATION_TEST_WRITE_EXEC = NodeType(
     produces_gate_evidence=False,
     default_model="claude-sonnet-5",
     escalation_model="claude-opus-5",
+    default_effort="medium",
+    escalation_effort="high",
 )

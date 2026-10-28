@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from forge.models.common import NodeKind
+from forge.models.common import EffortLevel, NodeKind
 from forge.models.permissions import PermissionProfile
 
 
@@ -29,6 +29,14 @@ class NodeType(BaseModel):
     produces_gate_evidence: bool = False
     default_model: str | None = None
     escalation_model: str | None = None
+    # Effort-level counterpart to default_model/escalation_model, same
+    # optionality and the same "none configured means don't override"
+    # semantics — unlike model, a node type is allowed to configure no
+    # effort at all, in which case the dispatcher sets no `effort` override
+    # on the model call and the model's own default behavior applies, same
+    # as today. See forge/controller/model_registry.py::select_effort.
+    default_effort: EffortLevel | None = None
+    escalation_effort: EffortLevel | None = None
     # How an EXECUTION node's structured output gets derived after its
     # session ends. "commit_diff" (the default): the dispatcher builds
     # {result_commit, changed_paths, summary} mechanically from git — for

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from forge.controller.execution_registry import ExecutionRunOutcome
+from forge.models.common import EffortLevel
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -141,15 +142,17 @@ def fake_execution_runner(
     worktree_path: str,
     *,
     chat_queue: queue.Queue[str] | None = None,
+    effort: EffortLevel | None = None,
 ) -> ExecutionRunOutcome:
     """
     Stands in for a real `claude` CLI session, the same way
     tests/cli/test_run_resume_list.py's fake does: writes real work into
     the worktree so the mechanical auto-commit safety net has something to
     commit, without ever touching a real LLM or network. Accepts (and
-    ignores) `chat_queue` purely to match `run_sdk_node`'s real keyword-only
-    signature — `RunWorker` always calls its configured execution runner
-    with that keyword now (see `forge/tui/runner.py`), chattable or not.
+    ignores) `chat_queue`/`effort` purely to match `run_sdk_node`'s real
+    keyword-only signature — `RunWorker` always calls its configured
+    execution runner with both keywords now (see `forge/tui/runner.py`),
+    chattable or not, effort-configured or not.
     """
     Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
     return ExecutionRunOutcome(completed=True, summary="wrote a passing test")

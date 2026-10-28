@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal, TypeAlias
+
+# Forge's own effort-level type — structurally identical to the Claude Agent
+# SDK's `claude_agent_sdk.types.EffortLevel`, but defined here so that
+# forge/models/* and forge/controller/* never import the SDK package at all
+# (only forge/adapters/execution/* does). The SDK adapter is the one place
+# that translates a value of this type into whatever the real SDK expects.
+EffortLevel: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class NodeKind(str, Enum):

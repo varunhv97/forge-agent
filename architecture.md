@@ -47,7 +47,14 @@ forge/
                   module itself never prints or reads stdin
   models/        typed contracts (Pydantic): common, request, graph,
                   attempt, evidence, decision, permissions, model_registry,
-                  run, trace
+                  run, trace. common.py also carries Forge's own
+                  EffortLevel (Literal["low", "medium", "high", "xhigh",
+                  "max"]) — structurally identical to the Claude Agent
+                  SDK's own type of the same name, but defined here so
+                  forge/models/*  and forge/controller/* stay free of any
+                  dependency on the SDK package; only
+                  forge/adapters/execution/* translates it into the real
+                  SDK's own types
   controller/
     validator.py        compile_and_validate() — acyclicity + domain
                           invariants, same path for templates and revisions
@@ -60,7 +67,12 @@ forge/
     store.py             typed CRUD over the schema above
     mechanical.py        MechanicalRunnerRegistry — deterministic checks,
                           no LLM, no adapter
-    model_registry.py    ModelRegistry (escalation eligibility) + select_model
+    model_registry.py    ModelRegistry (escalation eligibility) +
+                          select_model/select_effort — same failure-count
+                          policy (shared _prior_failures helper), kept as
+                          two functions since "no default configured" means
+                          something different for each (an error for model,
+                          a normal "don't override" for effort)
     decisions.py          apply_decision — the only place a DecisionProposal
                           becomes a real state change (see below)
     decision_dispatch.py  invoke_decision_node + deterministic fallbacks +
@@ -70,7 +82,13 @@ forge/
                           into live dispatch (see Known gap below)
     execution_registry.py ExecutionHandlerRegistry — the EXECUTION-node
                           counterpart to MechanicalRunnerRegistry: maps a
-                          node type to its build_input/build_prompt pair
+                          node type to its build_input/build_prompt pair.
+                          ExecutionRunner is a Protocol (not a plain
+                          Callable[[...], ...] alias — that shape can't
+                          express a keyword-only parameter at all), same
+                          as DispatchRetryFn in decisions.py: __call__(model,
+                          prompt, profile, worktree_path, *, effort:
+                          EffortLevel | None = None) -> ExecutionRunOutcome
     attempt_commit.py     current_head/commit_dirty_changes/changed_paths_
                           between — mechanically derives what an EXECUTION
                           attempt actually did, from git, never from what
@@ -126,11 +144,19 @@ forge/
                   every message polled off the queue; with no queue at
                   all this is a plain ClaudeSDKClient turn with nothing
                   injected, the observably-identical baseline the swap
-                  was proven against first. sdk_node_runner.py bridges it
-                  to the scheduler's sync ExecutionRunner contract
-                  (asyncio.run, same pattern as the decision adapter's
-                  bridge), threading chat_queue straight through
-                  (keyword-only, None by default); codex_cli_adapter.py
+                  was proven against first. build_claude_agent_options also
+                  takes an optional effort: EffortLevel | None, set
+                  straight onto the real ClaudeAgentOptions.effort field —
+                  confirmed from claude_agent_sdk.types directly that this
+                  is its own top-level field, not a key nested inside
+                  ClaudeAgentOptions.thinking (an initial assumption going
+                  into this feature, corrected by reading the real source
+                  before writing any code against it). sdk_node_runner.py
+                  bridges it to the scheduler's sync ExecutionRunner
+                  contract (asyncio.run, same pattern as the decision
+                  adapter's bridge), threading chat_queue and effort
+                  straight through (both keyword-only, None by default);
+                  codex_cli_adapter.py
                   (command construction + JSONL parsing, decoupled from
                   the sandbox via a duck-typed executor);
                   codex_execution_adapter.py (wires the Codex adapter to
@@ -440,6 +466,39 @@ re-verifies instead of a completion check trusting stale work. The
 *automatic* version (a later commit's diff touching the same paths an
 older evidence row covered) is real-git-tested in `invalidation.py` but
 not wired into live dispatch yet (see Known gaps).
+
+## Model and effort selection, concretely
+
+`select_model`/`select_effort` (`forge/controller/model_registry.py`) share
+one failure-count policy, computed by a shared `_prior_failures` helper so
+the two can't drift: 0–1 prior `FAILED` attempts for a task stays on
+`default_model`/`default_effort`; 2+ escalates to
+`escalation_model`/`escalation_effort`, falling back to the default if no
+escalation value is configured. They diverge only on what "nothing
+configured" means: every node type must have a `default_model` (no default
+is `NoDefaultModelConfiguredError`), but `default_effort` is allowed to be
+entirely unset — a node type that never configured any effort is the
+common case, not an error, and `select_effort` returns `None` for it.
+
+`dispatch_execution_attempt` calls `select_effort(task.id, node_type,
+attempts)` on every EXECUTION dispatch (fresh attempts and decision-driven
+retries/escalations alike, since it's recomputed from that dispatch's own
+attempt history) and passes the result to `execution_runner(..., effort=
+effort)`. `ExecutionRunner` is declared as a `Protocol` with a
+keyword-only `effort: EffortLevel | None = None` parameter on its
+`__call__` — not the plain `Callable[[...], ...]` alias it used to be,
+since that shape can't express a keyword-only parameter at all (the same
+`Protocol`-for-an-injected-callable pattern `DispatchRetryFn` in
+`decisions.py` already uses). `run_sdk_node` and `RunWorker.
+_run_sdk_node_with_chat` both forward `effort` straight through, same
+shape as `chat_queue`; `sdk_execution_adapter.build_claude_agent_options`
+is the one place it's translated into the real SDK's own
+`ClaudeAgentOptions.effort` field (see the `adapters/execution/` entry
+above for why `effort`, not `thinking`). `select_model` itself is not yet
+called anywhere live — model selection for a fresh attempt still falls
+back to `node_type.default_model` directly, and a retry/escalation's model
+comes from the decision proposal, not `select_model` — this predates the
+effort work and is unchanged by it.
 
 ## EXECUTION dispatch, concretely
 

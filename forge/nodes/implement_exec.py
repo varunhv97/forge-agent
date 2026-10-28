@@ -91,6 +91,12 @@ def build_prompt(input: ImplementExecInput) -> str:
     return "\n".join(lines)
 
 
+# implement_exec writes the actual feature code this whole pipeline exists
+# to produce — the highest-stakes, most open-ended work in it (unbounded
+# design/implementation choices, not a templated recipe). "high" by
+# default is warranted from the first attempt, not just after a failure;
+# "max" on escalation (2+ failures) spends the most expensive setting only
+# once cheaper reasoning has demonstrably not been enough.
 IMPLEMENT_EXEC = NodeType(
     name="implement_exec",
     kind=NodeKind.EXECUTION,
@@ -100,4 +106,6 @@ IMPLEMENT_EXEC = NodeType(
     produces_gate_evidence=False,
     default_model="claude-sonnet-5",
     escalation_model="claude-opus-5",
+    default_effort="high",
+    escalation_effort="max",
 )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from forge.controller.node_registry import NodeType
 from forge.models.attempt import Attempt, AttemptStatus
+from forge.models.common import EffortLevel
 from forge.models.model_registry import ModelCapability
 
 ESCALATION_FAILURE_THRESHOLD = 2
@@ -66,6 +67,20 @@ class ModelRegistry:
         return capability
 
 
+def _prior_failures(task_id: str, attempts: list[Attempt]) -> int:
+    """
+    How many of a task's recorded attempts are FAILED — the one piece of
+    history both select_model and select_effort escalate on. Shared so the
+    two policies can never silently drift apart on what "prior failures"
+    means.
+    """
+    return sum(
+        1
+        for attempt in attempts
+        if attempt.task_id == task_id and attempt.status == AttemptStatus.FAILED
+    )
+
+
 def select_model(task_id: str, node_type: NodeType, attempts: list[Attempt]) -> str:
     """
     The v1 model-selection heuristic: a deliberately simple, hand-written
@@ -88,13 +103,36 @@ def select_model(task_id: str, node_type: NodeType, attempts: list[Attempt]) -> 
             f"node type '{node_type.name}' has no default_model configured"
         )
 
-    prior_failures = sum(
-        1
-        for attempt in attempts
-        if attempt.task_id == task_id and attempt.status == AttemptStatus.FAILED
-    )
-
-    if prior_failures < ESCALATION_FAILURE_THRESHOLD:
+    if _prior_failures(task_id, attempts) < ESCALATION_FAILURE_THRESHOLD:
         return node_type.default_model
 
     return node_type.escalation_model or node_type.default_model
+
+
+def select_effort(task_id: str, node_type: NodeType, attempts: list[Attempt]) -> EffortLevel | None:
+    """
+    The effort-level counterpart to select_model, kept as its own function
+    rather than folded into select_model's return value: the two policies
+    share the exact same failure-count shape (see _prior_failures), but
+    their "nothing configured" behavior differs in a way that's awkward to
+    express as one return type. A node type MUST have a default_model (no
+    default means NoDefaultModelConfiguredError), but effort is allowed to
+    be entirely unconfigured — that's not an error, it just means "don't
+    override effort for this node type at all," so this returns None
+    rather than raising. Keeping them separate lets each function's error
+    semantics stay simple instead of one combined function having to
+    express "required" and "optional" at once.
+
+    Policy, once default_effort IS configured (identical shape to
+    select_model):
+      - 0 or 1 prior FAILED attempts for this task: default_effort.
+      - 2 or more prior FAILED attempts: escalation_effort, falling back to
+        default_effort if no escalation_effort is configured.
+    """
+    if node_type.default_effort is None:
+        return None
+
+    if _prior_failures(task_id, attempts) < ESCALATION_FAILURE_THRESHOLD:
+        return node_type.default_effort
+
+    return node_type.escalation_effort or node_type.default_effort

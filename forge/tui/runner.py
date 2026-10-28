@@ -44,6 +44,7 @@ from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import ControllerDependencies, run_to_completion
 from forge.controller.store import Store
+from forge.models.common import EffortLevel
 from forge.models.permissions import PermissionProfile
 from forge.nodes import register_all
 
@@ -86,7 +87,13 @@ class RunWorker:
         return self._thread is not None and self._thread.is_alive()
 
     def _run_sdk_node_with_chat(
-        self, model: str, prompt: str, profile: PermissionProfile, worktree_path: str
+        self,
+        model: str,
+        prompt: str,
+        profile: PermissionProfile,
+        worktree_path: str,
+        *,
+        effort: EffortLevel | None = None,
     ) -> ExecutionRunOutcome:
         """
         Wraps `run_sdk_node` so this `RunWorker` can expose, for exactly
@@ -100,11 +107,19 @@ class RunWorker:
         likely, is rejected outright because `LiveRunScreen` already saw
         `active_chat_queue` go back to `None` — either way, never
         delivered into a stale or future attempt's session.
+
+        `effort` is accepted keyword-only (same shape chat_queue already
+        set) because this method is what's wired in as `ControllerDependencies.
+        execution_runner`, which the scheduler now calls with `effort=`
+        on every EXECUTION dispatch — this method has no logic of its own
+        for it, just forwards it straight to `run_sdk_node`.
         """
         chat_queue: queue.Queue[str] = queue.Queue()
         self.active_chat_queue = chat_queue
         try:
-            return run_sdk_node(model, prompt, profile, worktree_path, chat_queue=chat_queue)
+            return run_sdk_node(
+                model, prompt, profile, worktree_path, chat_queue=chat_queue, effort=effort
+            )
         finally:
             self.active_chat_queue = None
 

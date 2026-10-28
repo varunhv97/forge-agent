@@ -48,6 +48,7 @@ def _chat_capturing_runner(received: list[str]):
         worktree_path: str,
         *,
         chat_queue: queue.Queue[str] | None = None,
+        effort: object = None,
     ) -> ExecutionRunOutcome:
         if chat_queue is not None:
             with contextlib.suppress(queue.Empty):

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from forge.models.common import EffortLevel
 from forge.models.graph import TaskSpec
 from forge.models.permissions import PermissionProfile
 from forge.models.request import Request
@@ -40,8 +41,31 @@ class ExecutionRunOutcome:
     session_id: str | None = None
 
 
-# (model, prompt, permission_profile, worktree_path) -> ExecutionRunOutcome
-ExecutionRunner = Callable[[str, str, PermissionProfile, str], ExecutionRunOutcome]
+class ExecutionRunner(Protocol):
+    """
+    (model, prompt, permission_profile, worktree_path) -> ExecutionRunOutcome,
+    plus a keyword-only `effort` the dispatcher passes on every call (see
+    `forge.controller.model_registry.select_effort`). Declared as a
+    Protocol rather than a plain `Callable[[...], ...]` type alias
+    specifically so this keyword-only parameter can be expressed at all —
+    `Callable[[...], ...]` can only describe positional parameters.
+    `effort` is `None` whenever a node type configures no
+    default_effort/escalation_effort, which is the common case for most
+    node types today; every concrete runner (`run_sdk_node`, `RunWorker.
+    _run_sdk_node_with_chat`) accepts it and simply does nothing SDK-side
+    when it's `None`, same as `chat_queue` already does for "no chat this
+    attempt."
+    """
+
+    def __call__(
+        self,
+        model: str,
+        prompt: str,
+        profile: PermissionProfile,
+        worktree_path: str,
+        *,
+        effort: EffortLevel | None = None,
+    ) -> ExecutionRunOutcome: ...
 
 
 InputT = TypeVar("InputT", bound=BaseModel)
