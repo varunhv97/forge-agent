@@ -214,3 +214,21 @@ class TestSelectEffort:
             _attempt("task-1", AttemptStatus.FAILED, attempt_number=2),
         ]
         assert select_effort("task-1", node_type, attempts) == "medium"
+
+    def test_interrupted_for_swap_attempts_are_never_counted_as_failures(self) -> None:
+        """
+        An attempt interrupted for a user-requested model/effort swap
+        (post-M9 phase 4) is neither a pass nor a failure — the session
+        itself never errored, it was cut short on purpose. Even two of
+        them (which would trip the escalation threshold if they were
+        FAILED, see test_two_failures_escalates above) must leave effort
+        selection on default_effort, exactly like
+        test_non_failed_attempts_are_not_counted already proves for
+        PASSED/RUNNING.
+        """
+        node_type = _node_type(default_effort="high", escalation_effort="max")
+        attempts = [
+            _attempt("task-1", AttemptStatus.INTERRUPTED_FOR_SWAP, attempt_number=1),
+            _attempt("task-1", AttemptStatus.INTERRUPTED_FOR_SWAP, attempt_number=2),
+        ]
+        assert select_effort("task-1", node_type, attempts) == "high"

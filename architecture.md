@@ -54,7 +54,14 @@ forge/
                   forge/models/*  and forge/controller/* stay free of any
                   dependency on the SDK package; only
                   forge/adapters/execution/* translates it into the real
-                  SDK's own types
+                  SDK's own types. attempt.py's AttemptStatus gained
+                  INTERRUPTED_FOR_SWAP (post-M9 phase 4) — neither PASSED
+                  nor FAILED, for an attempt cut short by a person's own
+                  model/effort swap request rather than a pass/fail
+                  verdict; Attempt itself gained pending_resume_model/
+                  pending_resume_effort (sdk_session_id, already existing,
+                  is reused as the session to resume from) — see "In-place
+                  model/effort swap, concretely" below
   controller/
     validator.py        compile_and_validate() — acyclicity + domain
                           invariants, same path for templates and revisions
@@ -88,7 +95,15 @@ forge/
                           express a keyword-only parameter at all), same
                           as DispatchRetryFn in decisions.py: __call__(model,
                           prompt, profile, worktree_path, *, effort:
-                          EffortLevel | None = None) -> ExecutionRunOutcome
+                          EffortLevel | None = None, resume_session_id:
+                          str | None = None) -> ExecutionRunOutcome.
+                          EffortSwapRequest (post-M9 phase 4, a frozen
+                          dataclass: effort: EffortLevel, model: str |
+                          None = None) is the validated, in-flight request
+                          that rides RunWorker.effort_swap_queue and comes
+                          back out on ExecutionRunOutcome.swap_requested —
+                          see "In-place model/effort swap, concretely"
+                          below
     attempt_commit.py     current_head/commit_dirty_changes/changed_paths_
                           between — mechanically derives what an EXECUTION
                           attempt actually did, from git, never from what
@@ -98,7 +113,14 @@ forge/
                           dispatch_execution_attempt (real worktree, real
                           prompt, real adapter call); failed tasks of
                           either kind get driven through a decision each
-                          tick instead of staying failed forever
+                          tick instead of staying failed forever.
+                          dispatch_execution_attempt also looks up this
+                          task's immediately prior attempt before dispatch:
+                          if it's AttemptStatus.INTERRUPTED_FOR_SWAP (post-M9
+                          phase 4), this one dispatch resumes that session
+                          and honors its pending_resume_model/
+                          pending_resume_effort, bypassing the normal
+                          model/effort selection entirely — see below
   nodes/          implement_exec, integration_test_write_exec,
                   manual_test_exec (EXECUTION, output_strategy=
                   "result_file" — writes .forge_result.json, no git diff to
@@ -178,11 +200,27 @@ forge/
                   is its own top-level field, not a key nested inside
                   ClaudeAgentOptions.thinking (an initial assumption going
                   into this feature, corrected by reading the real source
-                  before writing any code against it). sdk_node_runner.py
+                  before writing any code against it); also takes an
+                  optional resume: str | None (post-M9 phase 4), set onto
+                  ClaudeAgentOptions.resume — confirmed independent of
+                  model/effort from the same source. run_execution_attempt
+                  also takes optional model_swap_queue: queue.Queue[str] |
+                  None / effort_swap_queue: queue.Queue[EffortSwapRequest]
+                  | None (post-M9 phase 4): _watch_model_swap polls the
+                  former and calls client.set_model() in place;
+                  _watch_effort_swap polls the latter and calls
+                  client.interrupt(), letting the receive loop end on its
+                  own (a confirmed-from-source behavior, with a bounded
+                  timeout fallback that force-cancels the receive task if
+                  it doesn't) — see "In-place model/effort swap,
+                  concretely" below for the full mechanism.
+                  sdk_node_runner.py
                   bridges it to the scheduler's sync ExecutionRunner
                   contract (asyncio.run, same pattern as the decision
-                  adapter's bridge), threading chat_queue and effort
-                  straight through (both keyword-only, None by default);
+                  adapter's bridge), threading chat_queue, effort,
+                  live_messages, model_swap_queue, effort_swap_queue, and
+                  resume_session_id straight through (all keyword-only,
+                  None by default);
                   codex_cli_adapter.py
                   (command construction + JSONL parsing, decoupled from
                   the sandbox via a duck-typed executor);
@@ -261,6 +299,15 @@ forge/
                     or its own active_chat_queue is currently None.
                     live_messages_for(run_id) (post-M9 phase 3) is the same
                     shape for the live trace panel's own queue.
+                    request_execution_swap(run_id, node_type_name, *,
+                    model, effort) (post-M9 phase 4) is the one call
+                    LiveRunScreen's swap modal makes — delegates to
+                    forge.controller.decisions.request_execution_swap (the
+                    validated path) with whichever of the live RunWorker's
+                    model_swap_queue/effort_swap_queue currently exist
+                    (None/None when there's no RunWorker for that run,
+                    same as the two accessors above); never pokes a queue
+                    directly itself.
     runner.py       RunWorker — one threading.Thread per live run, its
                     own SQLite connection (db.connect, WAL mode), driving
                     the real run_to_completion with the real registries.
@@ -289,6 +336,18 @@ forge/
                     copied for the opposite direction — see "Live trace
                     window, concretely" below for the unbounded-queue and
                     stranded-message reasoning.
+                    model_swap_queue: queue.Queue[str] | None /
+                    effort_swap_queue: queue.Queue[EffortSwapRequest] |
+                    None (post-M9 phase 4) are the same lifecycle again —
+                    set/cleared by the same _run_sdk_node_with_chat call,
+                    same finally — now forwarded into run_sdk_node's own
+                    model_swap_queue/effort_swap_queue/resume_session_id
+                    parameters (the last threaded straight through from
+                    whatever the scheduler passed dispatch_execution_attempt
+                    on this call, see "In-place model/effort swap,
+                    concretely" below). Only forge.controller.decisions.
+                    request_execution_swap (via ForgeApp.
+                    request_execution_swap) ever puts onto either queue.
     chrome.py       Chrome — the three-dot-plus-title bar used in place
                     of Header() on every screen (post-M9 restyle to match
                     the original mockups). Dots use each semantic color's
@@ -413,6 +472,18 @@ forge/
                     (not just the current live_messages_for value) across
                     polls so a message still queued the instant the
                     attempt ends still gets drained.
+                    ModelEffortSwapModal + the `m` binding (post-M9 phase
+                    4) — see "In-place model/effort swap, concretely"
+                    below for the full mechanism this UI drives.
+                    LiveRunScreen tracks _row_task_ids/
+                    _live_execution_task_id/_live_node_type_name every
+                    refresh_run poll tick (same shape as DashboardScreen.
+                    _row_run_ids); check_action hides `m` from the footer
+                    entirely whenever ForgeApp.active_chat_queue_for is
+                    None, the same gate the chat input already uses, and
+                    the action itself re-checks that plus requires the
+                    TASKS table's current selection to actually be the
+                    live task before opening the modal.
     dag_layout.py   compute_dag_layout(tasks, edges) -> DagLayout — pure,
                     zero Textual imports. rank = longest path from a root
                     (no incoming "dependency" edge), which spreads a
@@ -589,6 +660,107 @@ In `dispatch_execution_attempt` (`scheduler.py`):
   safety net that exists precisely to recover from a starting point that
   turns out to be too weak; an override is a better first guess, not a
   promise that no failure will ever need more.
+
+## In-place model/effort swap, concretely
+
+Post-M9 phase 4, the last of the model/effort customization arc: lets a
+person change a *currently-running* EXECUTION attempt's model and/or
+effort without waiting for a retry. Two genuinely different mechanisms,
+confirmed from the real SDK source, not assumed:
+
+- **Model**: `ClaudeSDKClient.set_model(model)` is real, public,
+  documented ("Change the AI model during conversation") — no interrupt,
+  no reconnect, applies going forward on the same live session. The fast
+  path: `RunWorker.model_swap_queue` -> `_watch_model_swap`
+  (`sdk_execution_adapter.py`, same non-blocking-poll shape as
+  `_forward_chat_messages`) -> `client.set_model()`.
+- **Effort**: no SDK control request exists for it at all (checked every
+  method in `claude_agent_sdk._internal.query.Query`'s control-request
+  section). A real change needs `client.interrupt()`, the current turn
+  ending, `disconnect()`, then a *new* `ClaudeSDKClient` opened with
+  `resume=<session_id>` and the new `effort=` (an optional new `model=`
+  rides along on the same reconnect rather than costing a second one).
+  `client.interrupt()` itself only sends the interrupt control request and
+  waits for the CLI's acknowledgement of *that request* (confirmed from
+  `ClaudeSDKClient.interrupt()`/`Query.interrupt()`'s source) — the turn's
+  own end still arrives later as an ordinary terminal `ResultMessage` on
+  the same stream the receive loop already consumes, whose
+  `terminal_reason` the SDK documents as `"aborted_streaming"`/
+  `"aborted_tools"` for exactly this case. This is what lets
+  `_watch_effort_swap` just wait on the receive loop's own existing
+  `stop_event` rather than special-casing an interrupted turn — modeled,
+  not just asserted, in the fake `ClaudeSDKClient` double this feature's
+  tests use. `_INTERRUPT_RESULT_TIMEOUT_SECONDS` (30s) bounds that wait;
+  on timeout it also directly cancels the receive task itself (merely
+  giving up on the wait would not have unblocked `run_execution_attempt`,
+  which is separately blocked on `await receive_task`).
+
+`EffortSwapRequest` (`forge/controller/execution_registry.py`, a frozen
+dataclass: `effort: EffortLevel`, `model: str | None = None`) is the
+validated request that rides `RunWorker.effort_swap_queue` and comes back
+out on `ExecutionRunOutcome.swap_requested`. When a fired request carries
+no `model` of its own, `_watch_effort_swap` defaults it to whatever
+`_watch_model_swap` most recently applied (a shared one-element
+`current_model` list, seeded with the attempt's own dispatched model) —
+so a model swap that fired earlier in the same attempt survives into the
+effort swap's own reconnect instead of being silently lost, and "just
+change effort, leave the model alone" does exactly that even when no
+model swap happened at all.
+
+An attempt that gets interrupted this way is recorded as a new terminal
+`AttemptStatus.INTERRUPTED_FOR_SWAP` — neither PASSED (no evidence) nor
+FAILED (the session didn't error) — with no evidence row and
+`failure_summary=None`. `sdk_session_id` (the field every EXECUTION
+attempt already carries) is reused as the session to resume from;
+`pending_resume_model`/`pending_resume_effort` (new `Attempt` fields)
+carry the person's request forward. These live on `Attempt`, not
+`TaskSpec.model_override`/`effort_override` (the phase-2 custom-DAG
+override fields, structurally the same shape) — deliberately: those are
+graph-authored data on an immutable, append-only `GraphVersion`, and a
+live, one-dispatch-only override has no business mutating that. An
+`Attempt` is this project's own append-only history row for exactly one
+attempt, the right scope for "what should this task's next dispatch do
+differently."
+
+`_ready_tasks` (`scheduler.py`) already excludes a task from dispatch only
+when its latest attempt is RUNNING/PASSED/FAILED — INTERRUPTED_FOR_SWAP
+isn't in that set, so the task becomes ready again automatically, the same
+way CANCELLED/SUPERSEDED already do, with no change needed there.
+`dispatch_execution_attempt` looks up the task's immediately prior attempt
+before computing anything; when it's INTERRUPTED_FOR_SWAP, this one
+dispatch uses its `sdk_session_id` as `resume_session_id` and its
+`pending_resume_model`/`pending_resume_effort` in place of the normal
+override-or-default model expression and `select_effort`'s escalation
+policy — bypassed entirely for this dispatch only, since the user
+explicitly chose these, not a failure-driven escalation.
+`_prior_failures`/`_has_unrecoverable_failure`/
+`_failed_tasks_needing_decision` all already filter on `==
+AttemptStatus.FAILED` specifically, so INTERRUPTED_FOR_SWAP was never at
+risk of being miscounted — confirmed by a dedicated test, not just
+inferred from reading the filters.
+
+`forge.controller.decisions.request_execution_swap` is the one validated
+path a swap request goes through — mirrors `apply_decision`'s own rule
+that nothing outside the controller layer turns intent into effect. It
+checks a given `model` against `ModelRegistry.validate_eligible` (same
+check `apply_decision` runs for a decision's own `escalate_to_model`) and
+routes by what's being asked for: a model-only request goes to
+`model_swap_queue`; any request carrying an `effort` goes to
+`effort_swap_queue` as one `EffortSwapRequest`. `ForgeApp.
+request_execution_swap` is the only caller — `LiveRunScreen`'s `m` binding
+opens `ModelEffortSwapModal` (two `OptionList`s — model, filtered to
+`ModelRegistry.all_capabilities()` eligible for this node type; effort,
+from `EffortLevel`'s own `Literal` args — each with a real "(no change)"
+option, plus explicit Confirm/Cancel, since this modal collects two
+choices rather than dismissing on the first selection) and hands its
+result to that one call; the screen never pokes a `RunWorker`'s queues
+directly.
+
+A request still sitting on `model_swap_queue`/`effort_swap_queue` when an
+attempt ends normally (no swap ever happened) is simply never read again
+once `RunWorker` clears the attribute back to `None` in its `finally` —
+same staleness answer `active_chat_queue` already gave, confirmed again
+here with dedicated tests for both new queues.
 
 ## EXECUTION dispatch, concretely
 

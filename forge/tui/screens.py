@@ -19,7 +19,9 @@ stay correct whether the light or dark theme is active.
 from __future__ import annotations
 
 import queue
+import typing
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -47,10 +49,12 @@ from forge.cli import (
     compute_run_list,
     compute_trace_entries,
 )
+from forge.controller.decisions import InvalidSwapRequestError
 from forge.controller.node_registry import NodeTypeRegistry
 from forge.controller.store import NotFoundError
 from forge.controller.validator import GraphValidationError
 from forge.models.attempt import Attempt, AttemptStatus
+from forge.models.common import EffortLevel, NodeKind
 from forge.models.run import RunStatus
 from forge.modes.custom_dag import CustomDagError, DagTemplateInfo
 from forge.tui.chrome import Chrome
@@ -63,7 +67,7 @@ if TYPE_CHECKING:
     from forge.tui.app import ForgeApp
 
 _GREEN_STATUSES = {"passed", "completed_verified"}
-_AMBER_STATUSES = {"running", "active", "pending"}
+_AMBER_STATUSES = {"running", "active", "pending", "interrupted_for_swap"}
 _RED_STATUSES = {"failed", "failed_exhausted", "blocked_awaiting_input", "blocked", "cancelled"}
 
 
@@ -278,6 +282,135 @@ class ConfirmModal(ModalScreen[bool]):
 
     def action_decline(self) -> None:
         self.dismiss(False)
+
+
+@dataclass(frozen=True)
+class _SwapSelection:
+    """What `ModelEffortSwapModal` hands back: the model and/or effort a
+    person picked, each `None` if they left that choice at "(no change)".
+    At least one is non-`None` by the time this is dismissed with a real
+    value — the modal itself enforces that before dismissing."""
+
+    model: str | None
+    effort: EffortLevel | None
+
+
+class ModelEffortSwapModal(ModalScreen["_SwapSelection | None"]):
+    """
+    Lets a person pick a new model and/or effort level for the task's
+    currently-live EXECUTION attempt — the one UI surface that can change
+    either in place, without waiting for a retry (post-M9 phase 4, the
+    last of the model/effort customization arc).
+
+    Reuses the OptionList-based "pick a real registered value, never free
+    text" pattern `dag_builder_screen.py`'s `_VerificationMethodModal`
+    already established, extended two ways: two independent choices
+    rather than one, and an explicit Confirm/Cancel button pair instead of
+    dismissing on the first `OptionList.OptionSelected` — this modal has
+    two selections to make, and a person picking the model list first
+    must not have that alone close the whole modal before they've also
+    looked at effort. "(no change)" is a real, selectable option on both
+    lists (not just the initial unselected state), so a person can back
+    out of a selection without cancelling the whole modal.
+
+    This modal makes no judgment about *which* path a confirmed selection
+    takes (the fast, no-interruption model-only path vs. the
+    interrupt-and-reconnect path a chosen effort requires) — it only
+    collects the `(model, effort)` the person chose and hands it to the
+    caller as a `_SwapSelection`; `ForgeApp.request_execution_swap` /
+    `forge.controller.decisions.request_execution_swap` are what actually
+    decide and validate that, per this project's core invariant that a
+    UI layer only ever produces intent, never applies it directly.
+    """
+
+    _NO_CHANGE_ID = "__no_change__"
+
+    DEFAULT_CSS = """
+    ModelEffortSwapModal {
+        align: center middle;
+    }
+    ModelEffortSwapModal #swap-dialog {
+        width: 70%;
+        max-width: 80;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    ModelEffortSwapModal .section-title {
+        text-style: bold;
+        color: $primary;
+        margin-bottom: 1;
+    }
+    ModelEffortSwapModal OptionList {
+        height: 6;
+        margin-bottom: 1;
+    }
+    ModelEffortSwapModal #swap-buttons {
+        margin-top: 1;
+        align: right middle;
+    }
+    ModelEffortSwapModal #swap-buttons Button {
+        margin-left: 1;
+    }
+    """
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, task_id: str, model_ids: list[str], effort_levels: list[str]) -> None:
+        super().__init__()
+        self._task_id = task_id
+        self._model_ids = model_ids
+        self._effort_levels = effort_levels
+        self._selected_model: str | None = None
+        self._selected_effort: str | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="swap-dialog"):
+            yield Static(f"Swap model/effort — task {self._task_id}", classes="section-title")
+            yield Label("model")
+            model_options = [Option("(no change)", id=self._NO_CHANGE_ID)] + [
+                Option(model_id, id=model_id) for model_id in self._model_ids
+            ]
+            yield OptionList(*model_options, id="swap-model-list")
+            yield Label("effort")
+            effort_options = [Option("(no change)", id=self._NO_CHANGE_ID)] + [
+                Option(level, id=level) for level in self._effort_levels
+            ]
+            yield OptionList(*effort_options, id="swap-effort-list")
+            with Horizontal(id="swap-buttons"):
+                yield Button("Cancel", id="cancel-button")
+                yield Button("Confirm", id="confirm-button", variant="primary")
+
+    def on_mount(self) -> None:
+        self.query_one("#swap-model-list", OptionList).highlighted = 0
+        self.query_one("#swap-effort-list", OptionList).highlighted = 0
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = event.option_id
+        if option_id is None:
+            return
+        value = None if option_id == self._NO_CHANGE_ID else option_id
+        if event.option_list.id == "swap-model-list":
+            self._selected_model = value
+        elif event.option_list.id == "swap-effort-list":
+            self._selected_effort = value
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "confirm-button":
+            self.dismiss(None)
+            return
+        if self._selected_model is None and self._selected_effort is None:
+            self.app.notify(
+                "Pick a model and/or an effort level to change — both at "
+                "'(no change)' is nothing to confirm.",
+                severity="warning",
+            )
+            return
+        self.dismiss(
+            _SwapSelection(model=self._selected_model, effort=cast(Any, self._selected_effort))
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 # -- dashboard ------------------------------------------------------------------
@@ -637,6 +770,19 @@ class LiveRunScreen(Screen[None]):
     content while a chattable EXECUTION attempt is actually running —
     before/after/during a MECHANICAL attempt, there is nothing to drain,
     same scope boundary the chat input above already established.
+
+    `m` (post-M9 phase 4, the last of the model/effort customization arc)
+    opens `ModelEffortSwapModal` to change the *currently-live* EXECUTION
+    attempt's model and/or effort in place, without waiting for a retry —
+    gated the same way the chat input is (disabled, via `check_action`,
+    whenever `ForgeApp.active_chat_queue_for` is `None`) and additionally
+    requiring the TASKS table's own selection to be sitting on that live
+    task (`_swap_model_effort_flow`). Confirming a model-only change goes
+    through the fast, no-interruption path (`ClaudeSDKClient.set_model`);
+    confirming an effort change (with or without a model alongside it)
+    interrupts the live session and resumes it with a new one — both
+    decided by `ForgeApp.request_execution_swap`/`forge.controller.
+    decisions.request_execution_swap`, never by this screen directly.
     """
 
     # Panning moves by a fixed character step per keypress rather than the
@@ -726,6 +872,7 @@ class LiveRunScreen(Screen[None]):
         Binding("+", "zoom_full", "More detail"),
         Binding("-", "zoom_compact", "Less detail (fit wider)"),
         Binding("0", "zoom_reset", "Reset zoom/pan"),
+        Binding("m", "swap_model_effort", "Model/effort swap"),
     ]
 
     def __init__(self, run_id: str) -> None:
@@ -743,6 +890,19 @@ class LiveRunScreen(Screen[None]):
         # `RunWorker.live_messages` goes back to `None`) still gets one
         # final drain instead of being stranded.
         self._live_queue: queue.Queue[Any] | None = None
+        # Parallel to the tasks table's own rows, same shape as
+        # DashboardScreen._row_run_ids — which task id a given row
+        # corresponds to, rebuilt every `refresh_run` tick. Used by the
+        # model/effort swap action to know which task the cursor is on.
+        self._row_task_ids: list[str] = []
+        # The EXECUTION task currently RUNNING, if any, and its node type
+        # name — also rebuilt every `refresh_run` tick. `None`/`None` when
+        # nothing is live right now (before the first attempt, between
+        # attempts, during a MECHANICAL attempt, or after the run
+        # finishes) — the model/effort swap action refuses to open its
+        # modal unless the task selected in the TASKS table is this one.
+        self._live_execution_task_id: str | None = None
+        self._live_node_type_name: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Chrome(title=f"forge — run {self.run_id}")
@@ -823,6 +983,9 @@ class LiveRunScreen(Screen[None]):
         # rebuild instead, clamped to however many rows actually exist.
         previous_cursor_row = table.cursor_row
         table.clear()
+        self._row_task_ids = []
+        self._live_execution_task_id = None
+        self._live_node_type_name = None
         for task in graph.tasks:
             status = statuses[task.id]
             attempt = latest_by_task.get(task.id)
@@ -833,6 +996,10 @@ class LiveRunScreen(Screen[None]):
                 f"{task.node_kind.value}/{task.node_type}",
                 attempt_label,
             )
+            self._row_task_ids.append(task.id)
+            if task.node_kind == NodeKind.EXECUTION and status == AttemptStatus.RUNNING.value:
+                self._live_execution_task_id = task.id
+                self._live_node_type_name = task.node_type
         if table.row_count:
             table.move_cursor(row=min(previous_cursor_row, table.row_count - 1))
 
@@ -871,9 +1038,24 @@ class LiveRunScreen(Screen[None]):
         self._update_minimap()
         self._refresh_chat_input()
         self._refresh_live_trace()
+        # The model/effort swap binding's own availability
+        # (check_action, below) depends on `active_chat_queue_for`, which
+        # changes on its own as the background RunWorker thread
+        # progresses — not from a user action the way `_showing_graph`'s
+        # own refresh_bindings() call (in action_toggle_graph_view) is.
+        # Re-checking every poll tick is what keeps the footer's "m" hint
+        # (and the key actually firing vs. falling through) in sync with
+        # whether there's really anything live to swap right now.
+        self.refresh_bindings()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        return not (action in self._GRAPH_ONLY_ACTIONS and not self._showing_graph)
+        if action in self._GRAPH_ONLY_ACTIONS and not self._showing_graph:
+            return False
+        is_swap_without_a_live_attempt = (
+            action == "swap_model_effort"
+            and _get_app(self).active_chat_queue_for(self.run_id) is None
+        )
+        return not is_swap_without_a_live_attempt
 
     def action_toggle_graph_view(self) -> None:
         self._showing_graph = not self._showing_graph
@@ -976,6 +1158,86 @@ class LiveRunScreen(Screen[None]):
             )
             text += f"   rows {v_bar}"
         minimap.update(text)
+
+    # -- model/effort swap (post-M9 phase 4) -----------------------------------
+
+    def _selected_task_id(self) -> str | None:
+        """Same shape as `DashboardScreen._selected_run_id` — the task id
+        of whatever row the TASKS table's cursor is currently on, or
+        `None` if there's no selection/no rows at all."""
+        table = self.query_one("#tasks-table", DataTable)
+        if not self._row_task_ids or table.cursor_row is None:
+            return None
+        try:
+            return self._row_task_ids[table.cursor_row]
+        except IndexError:
+            return None
+
+    def action_swap_model_effort(self) -> None:
+        self.run_worker(self._swap_model_effort_flow(), exclusive=False)
+
+    async def _swap_model_effort_flow(self) -> None:
+        """
+        Opens `ModelEffortSwapModal` for the task selected in the TASKS
+        table, provided it's actually the one live EXECUTION attempt
+        right now, then hands the result to `ForgeApp.
+        request_execution_swap` — the one validated path a swap request
+        goes through (see that method's and `forge.controller.decisions.
+        request_execution_swap`'s own docstrings); this screen never
+        pokes a `RunWorker`'s queues directly.
+
+        Gating mirrors how the chat input already gates on
+        `active_chat_queue_for` (`check_action` above refuses the
+        binding entirely under the same condition), but this flow
+        re-checks it anyway at the point it actually acts — the same
+        "re-check at the moment of action, not just when the key was
+        pressed" defense `on_input_submitted` already uses for the
+        message-arrives-right-as-the-attempt-finishes race. It also
+        requires the *selected* row to be the live task specifically
+        (not just "something is live somewhere"), since the model
+        eligibility check below needs to know that task's own node type.
+        """
+        app = _get_app(self)
+        if app.active_chat_queue_for(self.run_id) is None:
+            self.app.notify(
+                "No live execution attempt to swap model/effort for.", severity="warning"
+            )
+            return
+        task_id = self._selected_task_id()
+        if task_id is None or task_id != self._live_execution_task_id:
+            self.app.notify(
+                "Select the currently running task in the TASKS list to swap " "its model/effort.",
+                severity="warning",
+            )
+            return
+        node_type_name = self._live_node_type_name
+        if node_type_name is None:
+            return
+
+        model_ids = [
+            capability.model_id
+            for capability in app.model_registry.all_capabilities()
+            if node_type_name in capability.eligible_roles
+        ]
+        effort_levels = list(typing.get_args(EffortLevel))
+        selection = await self.app.push_screen_wait(
+            ModelEffortSwapModal(task_id, model_ids, effort_levels)
+        )
+        if selection is None:
+            return
+
+        try:
+            app.request_execution_swap(
+                self.run_id, node_type_name, model=selection.model, effort=selection.effort
+            )
+        except InvalidSwapRequestError as exc:
+            self.app.notify(str(exc), severity="error")
+            return
+
+        if selection.effort is not None:
+            self.app.notify("Interrupting the live session to apply the new effort...", timeout=3)
+        else:
+            self.app.notify("Model swap sent to the live session.", timeout=2)
 
     # -- chat (M9 phase 6) ----------------------------------------------------
 

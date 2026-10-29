@@ -50,6 +50,17 @@ class ModelRegistry:
         except KeyError as exc:
             raise UnknownModelError(model_id) from exc
 
+    def all_capabilities(self) -> list[ModelCapability]:
+        """
+        Every registered model, in registration order — for a UI picker
+        (the live-run model/effort swap modal, `forge/tui/screens.py`)
+        that needs to enumerate real options rather than look one up by
+        id. Nothing needed full enumeration before this, mirroring why
+        `NodeTypeRegistry.all_types()` didn't exist before the DAG
+        builder's node-type palette needed one.
+        """
+        return list(self._by_model_id.values())
+
     def validate_eligible(self, model_id: str, node_type_name: str) -> ModelCapability:
         """
         Returns the ModelCapability for model_id if, and only if, it is

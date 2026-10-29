@@ -29,6 +29,7 @@ from forge.adapters.execution.sdk_execution_adapter import (
     run_execution_attempt,
     tool_call_event_from_hook_input,
 )
+from forge.controller.execution_registry import EffortSwapRequest
 from forge.isolation.hooks import HookDecision, build_pretooluse_hook
 from forge.models.permissions import PermissionProfile
 
@@ -271,7 +272,12 @@ def test_build_claude_agent_options_wired_hook_actually_enforces_the_profile():
 # scheduler eventually reports some `ExecutionRunOutcome`.
 
 
-def _make_fake_client_class(response_chunks: list[list[Any]], *, turn_delay_seconds: float = 0.1):
+def _make_fake_client_class(
+    response_chunks: list[list[Any]],
+    *,
+    turn_delay_seconds: float = 0.1,
+    aborted_session_id: str = "sess-aborted-1",
+):
     """
     Builds a fresh fake `ClaudeSDKClient` class (its own `instances` list,
     so tests never share state) whose `receive_response()` yields
@@ -280,6 +286,23 @@ def _make_fake_client_class(response_chunks: list[list[Any]], *, turn_delay_seco
     call `.query()` before the "turn" ends. Generous per this phase's own
     lesson about tight timing racing real concurrency: a flaky failure
     here should mean a real bug, not an unlucky scheduler.
+
+    `set_model()` just records the call, same shape as `query()` — the
+    real method applies in place with no further effect on the fake's own
+    response stream, which is exactly the "no interrupt, no reconnect"
+    behavior `ClaudeSDKClient.set_model`'s real docstring describes.
+
+    `interrupt()` models the real, *confirmed* (not assumed) behavior
+    `_watch_effort_swap`'s own docstring relies on: it records the call
+    and sets an internal flag; `receive_response()` checks that flag
+    between chunks (the same points it already awaits at) and, once set,
+    yields one terminal `ResultMessage` with `terminal_reason=
+    "aborted_streaming"` and `session_id=aborted_session_id` — mirroring
+    how a real interrupted turn still ends via an ordinary message on the
+    same stream, never a raised exception or an early `StopAsyncIteration`
+    — and then stops, the same "terminates immediately after yielding a
+    ResultMessage" contract `receive_response()`'s real docstring states
+    for an *ordinary* turn too.
     """
 
     class _FakeClaudeSDKClient:
@@ -288,6 +311,7 @@ def _make_fake_client_class(response_chunks: list[list[Any]], *, turn_delay_seco
         def __init__(self, options=None):
             self.options = options
             self.calls: list[tuple[str, Any]] = []
+            self._interrupted = False
             type(self).instances.append(self)
 
         async def connect(self, prompt):
@@ -296,9 +320,27 @@ def _make_fake_client_class(response_chunks: list[list[Any]], *, turn_delay_seco
         async def query(self, message):
             self.calls.append(("query", message))
 
+        async def set_model(self, model):
+            self.calls.append(("set_model", model))
+
+        async def interrupt(self):
+            self.calls.append(("interrupt", None))
+            self._interrupted = True
+
         async def receive_response(self):
             for chunk in response_chunks:
                 await asyncio.sleep(turn_delay_seconds)
+                if self._interrupted:
+                    yield ResultMessage(
+                        subtype="error",
+                        duration_ms=1,
+                        duration_api_ms=1,
+                        is_error=False,
+                        num_turns=1,
+                        session_id=aborted_session_id,
+                        terminal_reason="aborted_streaming",
+                    )
+                    return
                 for message in chunk:
                     yield message
 
@@ -710,3 +752,321 @@ def test_render_system_message_produces_no_lines():
     renders nothing, not an empty/placeholder line."""
     message = SystemMessage(subtype="init", data={})
     assert render_live_message(message) == []
+
+
+# -- model swap: the fast, no-interruption path (post-M9 phase 4) ----------
+
+
+def test_model_swap_request_calls_set_model_on_the_same_client_and_attempt_completes_normally(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The core proof of the fast path: a model string put on
+    `model_swap_queue` while the attempt is in flight results in a real
+    `client.set_model()` call on the *same* client instance — no
+    interrupt, no disconnect, no reconnect — and the attempt still
+    completes normally afterward (both response chunks delivered, no
+    `swap_requested` on the result).
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: part one"], ["assistant: part two"]], turn_delay_seconds=0.2
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    model_swap_queue: queue.Queue[str] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                model_swap_queue=model_swap_queue,
+            )
+        )
+        await asyncio.sleep(0.05)
+        model_swap_queue.put("claude-opus-5")
+        return await attempt
+
+    result = asyncio.run(_drive())
+
+    client = fake_cls.instances[-1]
+    assert ("set_model", "claude-opus-5") in client.calls
+    assert not any(call[0] == "interrupt" for call in client.calls)
+    disconnect_index = client.calls.index(("disconnect", None))
+    set_model_index = client.calls.index(("set_model", "claude-opus-5"))
+    assert set_model_index < disconnect_index  # applied while still "in flight"
+    assert result.messages == ["assistant: part one", "assistant: part two"]
+    assert result.swap_requested is None
+
+
+def test_model_swap_queue_still_holding_a_message_when_the_attempt_ends_normally_is_harmless(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The staleness question this phase's own brief calls out, for the
+    model-swap queue specifically: a message put on `model_swap_queue`
+    *after* the attempt has already finished (so the polling task that
+    would have applied it is long since cancelled) is simply never
+    applied — no error, no effect on the already-returned result, same
+    as a stale `chat_queue` message already behaves.
+    """
+    fake_cls = _make_fake_client_class([["assistant: done"]], turn_delay_seconds=0.01)
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    model_swap_queue: queue.Queue[str] = queue.Queue()
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+            model_swap_queue=model_swap_queue,
+        )
+    )
+    model_swap_queue.put("too late")  # the attempt (and its polling loop) is already done
+
+    client = fake_cls.instances[-1]
+    assert not any(call[0] == "set_model" for call in client.calls)
+    assert result.messages == ["assistant: done"]
+
+
+# -- effort swap: the interrupt-and-reconnect path (post-M9 phase 4) -------
+
+
+def test_effort_swap_request_interrupts_and_the_result_carries_the_swap_forward(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The core proof of the heavier path: an `EffortSwapRequest` put on
+    `effort_swap_queue` while the attempt is in flight results in a real
+    `client.interrupt()` call, the receive loop ending on its own via the
+    fake's modeled terminal `ResultMessage` (not a forced cancellation —
+    see `_make_fake_client_class`'s own docstring for exactly what's
+    modeled here), and `disconnect()` still running afterward.
+    `ExecutionResult.swap_requested` carries the exact request that fired,
+    and `session_id` is the session to resume from (the aborted turn's
+    own `ResultMessage.session_id`) — both of which
+    `dispatch_execution_attempt` needs for the task's next dispatch.
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: part one"], ["assistant: part two"]],
+        turn_delay_seconds=0.2,
+        aborted_session_id="sess-to-resume-1",
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
+    swap_request = EffortSwapRequest(effort="max")
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                effort_swap_queue=effort_swap_queue,
+            )
+        )
+        # Past the first chunk's own 0.2s delay (so "assistant: part one"
+        # has already been delivered and appended to messages) but well
+        # before the second chunk's delay elapses — the interrupt must
+        # cut the turn short before the second chunk, not erase the first.
+        await asyncio.sleep(0.25)
+        effort_swap_queue.put(swap_request)
+        return await attempt
+
+    result = asyncio.run(_drive())
+
+    client = fake_cls.instances[-1]
+    assert ("interrupt", None) in client.calls
+    assert client.calls[-1] == ("disconnect", None)
+    # The first chunk was delivered; the interrupt cut the turn short
+    # before the second, deliberately-delayed chunk ever arrived.
+    assert result.messages[0] == "assistant: part one"
+    assert isinstance(result.messages[-1], ResultMessage)
+    assert result.messages[-1].terminal_reason == "aborted_streaming"
+    assert result.session_id == "sess-to-resume-1"
+    assert result.swap_requested == EffortSwapRequest(effort="max", model="claude-sonnet-5")
+
+
+def test_effort_swap_request_with_no_model_defaults_to_this_attempts_own_current_model(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    An effort-only swap request (no `model` of its own) must not lose
+    track of whatever model this attempt was actually running —
+    `_watch_effort_swap` defaults to `current_model`, seeded with this
+    attempt's own dispatched model, rather than `None` (which would have
+    let the task's *next* dispatch silently fall back to the node type's
+    default instead of preserving "just change effort, leave the model
+    alone").
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: hello"], ["assistant: world"]], turn_delay_seconds=0.2
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                effort_swap_queue=effort_swap_queue,
+            )
+        )
+        await asyncio.sleep(0.05)
+        effort_swap_queue.put(EffortSwapRequest(effort="low"))
+        return await attempt
+
+    result = asyncio.run(_drive())
+    assert result.swap_requested == EffortSwapRequest(effort="low", model="claude-sonnet-5")
+
+
+def test_a_model_swap_that_fires_before_an_effort_swap_survives_into_the_effort_swaps_own_record(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The "what if both arrive in close succession" question this phase's
+    own brief calls out: a model swap applied first (via `set_model`)
+    must not be silently lost when an effort swap follows without
+    re-stating the model — `_watch_effort_swap` picks up
+    `_watch_model_swap`'s own `current_model` update.
+    """
+    fake_cls = _make_fake_client_class(
+        [["assistant: one"], ["assistant: two"], ["assistant: three"]], turn_delay_seconds=0.15
+    )
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    model_swap_queue: queue.Queue[str] = queue.Queue()
+    effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                model_swap_queue=model_swap_queue,
+                effort_swap_queue=effort_swap_queue,
+            )
+        )
+        # The model swap fires well before the effort swap, with enough
+        # separation that the model-swap polling loop has certainly
+        # already applied it by the time the effort swap is queued.
+        await asyncio.sleep(0.05)
+        model_swap_queue.put("claude-opus-5")
+        await asyncio.sleep(0.05)
+        effort_swap_queue.put(EffortSwapRequest(effort="xhigh"))
+        return await attempt
+
+    result = asyncio.run(_drive())
+
+    client = fake_cls.instances[-1]
+    assert ("set_model", "claude-opus-5") in client.calls
+    assert ("interrupt", None) in client.calls
+    assert result.swap_requested == EffortSwapRequest(effort="xhigh", model="claude-opus-5")
+
+
+def test_effort_swap_queue_still_holding_a_request_when_the_attempt_ends_normally_is_harmless(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    Same staleness question as the model-swap queue's own test above, for
+    the effort-swap queue: a request put on it *after* the attempt has
+    already finished normally (no interrupt ever happened) is simply
+    never acted on — no error, `interrupt()` never called, no effect on
+    the already-returned result.
+    """
+    fake_cls = _make_fake_client_class([["assistant: done"]], turn_delay_seconds=0.01)
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", fake_cls)
+    effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
+
+    result = asyncio.run(
+        run_execution_attempt(
+            prompt="do the thing",
+            profile=_profile(),
+            worktree_path="/tmp/wt",
+            model="claude-sonnet-5",
+            effort_swap_queue=effort_swap_queue,
+        )
+    )
+    effort_swap_queue.put(EffortSwapRequest(effort="max"))  # too late, nothing is polling it
+
+    client = fake_cls.instances[-1]
+    assert not any(call[0] == "interrupt" for call in client.calls)
+    assert result.messages == ["assistant: done"]
+    assert result.swap_requested is None
+
+
+def test_interrupt_timeout_fallback_still_lets_disconnect_proceed(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    The documented-behavior-with-a-bounded-fallback half of this feature:
+    if, hypothetically, an interrupted turn never produced a terminal
+    `ResultMessage` at all (contradicting the real SDK's own documented
+    behavior `_watch_effort_swap` otherwise relies on), this must not hang
+    the attempt forever. Simulated by a `receive_response()` that just
+    stalls forever once interrupted, with `_INTERRUPT_RESULT_TIMEOUT_SECONDS`
+    monkeypatched down to something a test can actually wait out.
+    """
+    monkeypatch.setattr(sdk_execution_adapter, "_INTERRUPT_RESULT_TIMEOUT_SECONDS", 0.1)
+
+    class _HangingOnInterruptClient:
+        instances: ClassVar[list[Any]] = []
+
+        def __init__(self, options=None):
+            self.calls: list[tuple[str, Any]] = []
+            type(self).instances.append(self)
+
+        async def connect(self, prompt):
+            self.calls.append(("connect", prompt))
+
+        async def interrupt(self):
+            self.calls.append(("interrupt", None))
+            # Deliberately never causes receive_response to end — models
+            # the "documented behavior doesn't hold" case the timeout
+            # fallback exists for.
+
+        async def receive_response(self):
+            yield "assistant: stuck"
+            await asyncio.sleep(10_000)  # effectively forever, for this test
+            yield "unreachable"
+
+        async def disconnect(self):
+            self.calls.append(("disconnect", None))
+
+    monkeypatch.setattr(sdk_execution_adapter, "ClaudeSDKClient", _HangingOnInterruptClient)
+    effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
+
+    async def _drive():
+        attempt = asyncio.ensure_future(
+            run_execution_attempt(
+                prompt="do the thing",
+                profile=_profile(),
+                worktree_path="/tmp/wt",
+                model="claude-sonnet-5",
+                effort_swap_queue=effort_swap_queue,
+            )
+        )
+        await asyncio.sleep(0.05)
+        effort_swap_queue.put(EffortSwapRequest(effort="high"))
+        return await asyncio.wait_for(attempt, timeout=5.0)
+
+    result = asyncio.run(_drive())
+
+    client = _HangingOnInterruptClient.instances[-1]
+    assert ("interrupt", None) in client.calls
+    assert client.calls[-1] == ("disconnect", None)
+    # The request that triggered the interrupt is still reported — the
+    # person's request is still honored on the task's next dispatch — but
+    # there's no session_id to resume from, since no ResultMessage (with
+    # or without a session id) was ever produced for this attempt. The
+    # timeout only bounds the *wait*; it doesn't fabricate a result the
+    # SDK never produced.
+    assert result.swap_requested == EffortSwapRequest(effort="high", model="claude-sonnet-5")
+    assert result.session_id is None

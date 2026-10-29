@@ -61,7 +61,7 @@ from forge.controller.node_registry import (
 from forge.controller.store import Store
 from forge.isolation.worktree_manager import create_worktree
 from forge.models.attempt import Attempt, AttemptStatus
-from forge.models.common import NodeKind
+from forge.models.common import EffortLevel, NodeKind
 from forge.models.decision import DecisionAction, DecisionProposal
 from forge.models.evidence import Evidence
 from forge.models.graph import GraphVersion, TaskSpec
@@ -455,7 +455,11 @@ def _effort_aware_node_type(task: TaskSpec, node_type: NodeType) -> NodeType:
     return node_type.model_copy(update={"default_effort": task.effort_override})
 
 
-def dispatch_execution_attempt(
+def dispatch_execution_attempt(  # noqa: PLR0915 - the swap-resume branch adds real,
+    # distinct steps (prior-attempt lookup, the INTERRUPTED_FOR_SWAP early
+    # return) alongside the existing pass/fail path, not incidental bulk;
+    # splitting either half out would just relocate the line count, same
+    # reasoning as apply_decision's own existing noqa for this rule.
     task: TaskSpec,
     run: Run,
     graph: GraphVersion,
@@ -482,19 +486,48 @@ def dispatch_execution_attempt(
     `result_commit`, and a real `git diff` against the base commit becomes
     `changed_paths`. A node's own claims about what it did are never the
     source of truth for this; git is.
+
+    Before any of that: if this task's *immediately prior* attempt is
+    INTERRUPTED_FOR_SWAP (a person asked to change its model/effort in
+    place — see `request_execution_swap`/`AttemptStatus.
+    INTERRUPTED_FOR_SWAP`'s own docstring), this one dispatch resumes that
+    exact session (`resume_session_id`) and honors the model/effort it
+    carried forward (`pending_resume_model`/`pending_resume_effort`),
+    bypassing the normal override-or-default model expression and
+    `select_effort`'s escalation policy for this dispatch only — the user
+    explicitly chose these, so neither is a failure-driven escalation
+    decision. This has no interaction with decision-driven retries/
+    escalations: those only ever fire from a FAILED latest attempt
+    (`apply_decision`), never an INTERRUPTED_FOR_SWAP one, so `model_used`
+    (an explicit decision choice) is never present at the same time as a
+    pending resume in practice — if it somehow were, `model_used` still
+    wins, consistent with it already being the most specific instruction
+    in the existing override-or-default chain.
     """
     node_type = node_registry.get(task.node_type)
     profile = permission_registry.get(task.permission_profile)
     handlers = execution_handler_registry.get(task.node_type)
+
+    prior_attempts = store.load_attempts(run.id)
+    latest_prior = _latest_attempt_per_task(prior_attempts).get(task.id)
+    resume_session_id: str | None = None
+    pending_model: str | None = None
+    pending_effort: EffortLevel | None = None
+    if latest_prior is not None and latest_prior.status == AttemptStatus.INTERRUPTED_FOR_SWAP:
+        resume_session_id = latest_prior.sdk_session_id
+        pending_model = latest_prior.pending_resume_model
+        pending_effort = latest_prior.pending_resume_effort
+
     # model_used (a decision-driven retry/escalation's explicit choice)
-    # always wins when present; otherwise a task-level override (validated
-    # at custom-DAG-build time against the real ModelRegistry) wins over
-    # the node type's own default_model — the same "override-or-default"
-    # shape task.permission_profile already uses relative to node_type.
+    # always wins when present; next, a pending resume's own requested
+    # model (above); otherwise a task-level override (validated at
+    # custom-DAG-build time against the real ModelRegistry) wins over the
+    # node type's own default_model — the same "override-or-default" shape
+    # task.permission_profile already uses relative to node_type.
     # permission_profile. This is still the one fresh-dispatch model
     # decision that never goes through select_model's escalation policy at
     # all — a pre-existing gap (see architecture.md), unchanged here.
-    model = model_used or task.model_override or node_type.default_model
+    model = model_used or pending_model or task.model_override or node_type.default_model
     if model is None:
         raise ValueError(f"no model configured for node type '{task.node_type}'")
 
@@ -534,9 +567,63 @@ def dispatch_execution_attempt(
     # no default_effort at all, which every runner treats as "don't
     # override effort for this call." See _effort_aware_node_type for how a
     # task-level effort_override folds into this without disabling
-    # escalation.
-    effort = select_effort(task.id, _effort_aware_node_type(task, node_type), attempts)
-    outcome = execution_runner(model, prompt, profile, worktree.worktree_path, effort=effort)
+    # escalation. A pending resume's own requested effort (above) bypasses
+    # this policy entirely for this one dispatch — the user explicitly
+    # chose it, this isn't a failure-driven escalation decision.
+    effort = pending_effort or select_effort(
+        task.id, _effort_aware_node_type(task, node_type), attempts
+    )
+    outcome = execution_runner(
+        model,
+        prompt,
+        profile,
+        worktree.worktree_path,
+        effort=effort,
+        resume_session_id=resume_session_id,
+    )
+
+    if outcome.swap_requested is not None:
+        # Interrupted because a person asked to change this attempt's
+        # model/effort in place (see EffortSwapRequest's own docstring) —
+        # not a pass/fail result at all, so node_type.output_strategy and
+        # task.acceptance_criterion_ids are never consulted here, and no
+        # Evidence is produced. Still commit any dirty worktree changes as
+        # the usual safety net (the session may have made real progress
+        # before being cut short); whether that happened is informational
+        # only, since nothing here claims it as a passing (or failing)
+        # result.
+        try:
+            commit_dirty_changes(worktree.worktree_path, f"forge: {task.id} attempt {attempt.id}")
+            swap_result_commit = current_head(worktree.worktree_path)
+        except GitStateError:
+            swap_result_commit = base_commit
+        attempt.status = AttemptStatus.INTERRUPTED_FOR_SWAP
+        attempt.finished_at = _now()
+        attempt.failure_summary = None
+        attempt.result_commit = None if swap_result_commit == base_commit else swap_result_commit
+        # The session to resume from — same field a normal attempt uses,
+        # reused here since the meaning ("this attempt's real Claude Agent
+        # SDK session id") is identical; only what the *next* dispatch does
+        # with it differs (see dispatch_execution_attempt's own docstring).
+        attempt.sdk_session_id = outcome.session_id
+        attempt.pending_resume_model = outcome.swap_requested.model
+        attempt.pending_resume_effort = outcome.swap_requested.effort
+        store.record_attempt_result(attempt, [])
+        store.append_trace_event(
+            TraceEvent(
+                id=new_id("tev"),
+                run_id=run.id,
+                event_type="attempt_finished",
+                payload={
+                    "task_id": task.id,
+                    "attempt_id": attempt.id,
+                    "status": attempt.status,
+                    "summary": "interrupted for a user-requested model/effort swap",
+                },
+                created_at=_now(),
+            )
+        )
+        return attempt
 
     passed = False
     summary = outcome.summary

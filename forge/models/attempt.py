@@ -6,6 +6,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from forge.models.common import EffortLevel
+
 
 class AttemptStatus(str, Enum):
     PENDING = "pending"
@@ -15,6 +17,19 @@ class AttemptStatus(str, Enum):
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
     SUPERSEDED = "superseded"  # evidence invalidated by later changes
+    # A live EXECUTION attempt was interrupted because a person asked to
+    # change its model/effort in place (forge/controller/decisions.py::
+    # request_execution_swap -> the effort-swap path) — deliberately not
+    # FAILED: the session itself never errored, it was cut short on
+    # purpose, and _prior_failures/_has_unrecoverable_failure (both of
+    # which only ever count AttemptStatus.FAILED) must never see this as
+    # a failure. Not PASSED either, since no evidence was produced. Like
+    # CANCELLED/SUPERSEDED, a task whose *latest* attempt has this status
+    # is still eligible for a fresh dispatch (_ready_tasks), which is how
+    # the scheduler picks the task back up — see pending_resume_model/
+    # pending_resume_effort below for what that next dispatch carries
+    # forward, and scheduler.py::dispatch_execution_attempt for how.
+    INTERRUPTED_FOR_SWAP = "interrupted_for_swap"
 
 
 class Attempt(BaseModel):
@@ -57,3 +72,17 @@ class Attempt(BaseModel):
     # never read back by Forge itself, and does not affect retry/resume
     # policy.
     sdk_session_id: str | None = None
+    # Set only on an INTERRUPTED_FOR_SWAP attempt: the model/effort a
+    # person asked for when they triggered the interrupt (see
+    # request_execution_swap), carried forward so this task's *next*
+    # dispatch can honor it — scheduler.dispatch_execution_attempt reads
+    # these off the latest attempt (plus sdk_session_id above, reused as
+    # the session to resume from) rather than mutating the versioned
+    # GraphVersion/TaskSpec a custom DAG authored; an Attempt is the
+    # project's own append-only history row for exactly this attempt, so
+    # this is ephemeral, one-dispatch scheduler state, not graph-authored
+    # data. None for every other attempt, including the one dispatched to
+    # actually honor them (which is a normal PASSED/FAILED attempt once it
+    # runs).
+    pending_resume_model: str | None = None
+    pending_resume_effort: EffortLevel | None = None

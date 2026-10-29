@@ -5,7 +5,7 @@ import queue
 from typing import Any
 
 from forge.adapters.execution.sdk_execution_adapter import run_execution_attempt
-from forge.controller.execution_registry import ExecutionRunOutcome
+from forge.controller.execution_registry import EffortSwapRequest, ExecutionRunOutcome
 from forge.models.common import EffortLevel
 from forge.models.permissions import PermissionProfile
 
@@ -19,6 +19,9 @@ def run_sdk_node(
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
     live_messages: queue.Queue[Any] | None = None,
+    model_swap_queue: queue.Queue[str] | None = None,
+    effort_swap_queue: queue.Queue[EffortSwapRequest] | None = None,
+    resume_session_id: str | None = None,
 ) -> ExecutionRunOutcome:
     """
     Bridges the scheduler's synchronous `ExecutionRunner` contract to the
@@ -54,6 +57,16 @@ def run_sdk_node(
     turn's terminal `ResultMessage`, or `None` if there wasn't one) — this
     is the one new thing this bridge adds for the `forge inspect`
     session-id feature; everything else about this function is unchanged.
+
+    `model_swap_queue`/`effort_swap_queue`/`resume_session_id` are each
+    handed straight through too, same keyword-only, `None`-by-default
+    shape as the three above — this bridge has no swap logic of its own,
+    it just forwards them to `run_execution_attempt`. `ExecutionRunOutcome.
+    swap_requested` is threaded straight through from `result.
+    swap_requested` the same way `session_id` already is — `None` for an
+    ordinary pass/fail attempt, set only when this attempt was interrupted
+    for a user-requested effort swap (see `EffortSwapRequest`'s own
+    docstring).
     """
     try:
         result = asyncio.run(
@@ -65,6 +78,9 @@ def run_sdk_node(
                 chat_queue=chat_queue,
                 effort=effort,
                 live_messages=live_messages,
+                model_swap_queue=model_swap_queue,
+                effort_swap_queue=effort_swap_queue,
+                resume_session_id=resume_session_id,
             )
         )
     except Exception as exc:  # noqa: BLE001 - any adapter failure is a failed attempt, by contract
@@ -73,4 +89,9 @@ def run_sdk_node(
     summary = f"session completed with {len(result.messages)} message(s)"
     if result.denied_calls:
         summary += f"; {len(result.denied_calls)} tool call(s) denied by permission profile"
-    return ExecutionRunOutcome(completed=True, summary=summary, session_id=result.session_id)
+    return ExecutionRunOutcome(
+        completed=True,
+        summary=summary,
+        session_id=result.session_id,
+        swap_requested=result.swap_requested,
+    )

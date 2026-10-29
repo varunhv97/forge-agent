@@ -23,6 +23,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import ServerToolResultBlock, ServerToolUseBlock, SyncHookJSONOutput
 
+from forge.controller.execution_registry import EffortSwapRequest
 from forge.isolation.hooks import (
     HookDecision,
     PreToolUseHook,
@@ -130,6 +131,7 @@ def build_claude_agent_options(
     max_turns: int | None = None,
     decision_log: list[DecisionLogEntry] | None = None,
     effort: EffortLevel | None = None,
+    resume: str | None = None,
 ) -> ClaudeAgentOptions:
     """
     Builds the `ClaudeAgentOptions` for one execution attempt: scoped to its
@@ -158,6 +160,16 @@ def build_claude_agent_options(
     `thinking` itself is untouched here; with `effort=None` (no
     `default_effort` configured for the node type), this call is
     byte-for-byte what it was before this feature existed.
+
+    `resume`, when given, is passed straight through to the real SDK's own
+    `ClaudeAgentOptions.resume: str | None` field — "Session ID to resume.
+    Loads the conversation history from the specified session," confirmed
+    from `claude_agent_sdk.types` directly. It's a plain top-level field,
+    independent of `model`/`effort` (no mutual-exclusivity or coupling
+    with either, unlike `continue_conversation`, which `resume` *is*
+    documented as mutually exclusive with — never set here). `None` (the
+    default) leaves it unset, same as before this parameter existed; this
+    is what a fresh (non-resumed) attempt always passes.
     """
     policy = build_pretooluse_hook(profile, worktree_path)
     callback = make_pretooluse_hook_callback(policy, decision_log=decision_log)
@@ -176,6 +188,7 @@ def build_claude_agent_options(
         model=model,
         max_turns=max_turns,
         effort=effort,
+        resume=resume,
     )
 
 
@@ -186,6 +199,10 @@ class ExecutionResult:
     messages: list[Any] = field(default_factory=list)
     decisions: list[DecisionLogEntry] = field(default_factory=list)
     session_id: str | None = None
+    # Set when this attempt was interrupted by a user-requested effort (and
+    # optionally model) swap — see `run_execution_attempt`'s own docstring
+    # and `EffortSwapRequest`'s. `None` for every ordinary attempt.
+    swap_requested: EffortSwapRequest | None = None
 
     @property
     def denied_calls(self) -> list[DecisionLogEntry]:
@@ -365,6 +382,169 @@ async def _forward_chat_messages(
         await client.query(message)
 
 
+async def _watch_model_swap(
+    client: ClaudeSDKClient,
+    model_swap_queue: queue.Queue[str],
+    stop_event: asyncio.Event,
+    current_model: list[str],
+) -> None:
+    """
+    Polls `model_swap_queue` for a user-requested model change and applies
+    it to `client`'s already-open session via `client.set_model()` — a
+    real, public, documented SDK method ("Change the AI model during
+    conversation (only works with streaming mode)"), confirmed from
+    `claude_agent_sdk.client.ClaudeSDKClient.set_model` directly: no
+    interrupt, no disconnect, no reconnect — it applies going forward
+    within this same session, exactly like `_forward_chat_messages` calls
+    `client.query()` on the same live client. This is the fast path; an
+    effort change has no such in-place method at all (see
+    `_watch_effort_swap`) and needs the much heavier interrupt-and-
+    reconnect path instead.
+
+    Same non-blocking `get_nowait()` poll shape and interval as
+    `_forward_chat_messages`, for the identical reason: this must never
+    block the receive loop. Keeps polling for the rest of the attempt
+    (not just once) — a person can change their mind about the model more
+    than once within one attempt, and each one is a fresh, independent
+    `set_model()` call.
+
+    `current_model` is a one-element mutable list (plain closures can't be
+    reassigned from inside a coroutine the way a `nonlocal` local could,
+    and this needs to be shared with `_watch_effort_swap`, which isn't a
+    nested closure) holding this attempt's currently-live model, seeded
+    with its original dispatched model by the caller and updated here
+    after every successful `set_model()` call. This is what lets a model
+    swap that fires before an effort swap (see `run_execution_attempt`'s
+    own docstring on the two queues racing) survive into the effort
+    swap's own reconnect instead of being silently lost.
+    """
+    while not stop_event.is_set():
+        try:
+            model = model_swap_queue.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(_CHAT_POLL_INTERVAL_SECONDS)
+            continue
+        await client.set_model(model)
+        current_model[0] = model
+
+
+# How long `_watch_effort_swap` waits, after calling `client.interrupt()`,
+# for the receive loop to end on its own via a terminal `ResultMessage`
+# before giving up and letting `run_execution_attempt`'s own
+# `finally: await client.disconnect()` proceed regardless. This is a
+# documented-behavior assumption with a bounded fallback, not blind trust:
+# `ClaudeSDKClient.interrupt()`'s docstring and `ResultMessage.
+# terminal_reason`'s own docstring (confirmed from `claude_agent_sdk.types`
+# directly — a value of "aborted_streaming"/"aborted_tools" "indicates the
+# turn was cancelled") both say an interrupted turn still ends with a
+# terminal ResultMessage the same way an ordinary turn does, which is what
+# this code is built to rely on — and which the fake ClaudeSDKClient double
+# in this module's test suite is built to model, not just assert. 30
+# seconds is a generous multiple of how long a real interrupt should ever
+# actually take (the CLI aborting whatever tool call/turn is in flight and
+# writing its final result frame — a local, in-process operation, not a
+# network round trip) while still bounding one swap request against a hung
+# session if that documented behavior doesn't hold for some real session:
+# without this, a stuck interrupt would block this attempt (and the
+# scheduler thread driving it) forever.
+_INTERRUPT_RESULT_TIMEOUT_SECONDS = 30.0
+
+
+async def _watch_effort_swap(
+    client: ClaudeSDKClient,
+    effort_swap_queue: queue.Queue[EffortSwapRequest],
+    stop_event: asyncio.Event,
+    triggered: list[EffortSwapRequest],
+    current_model: list[str],
+    receive_task: asyncio.Task[None],
+) -> None:
+    """
+    Polls `effort_swap_queue` for a user-requested effort (and optionally
+    bundled model) change. There is no SDK control request for changing
+    effort mid-session — confirmed by reading every method in
+    `claude_agent_sdk._internal.query.Query`'s control-request section
+    (`interrupt`, `set_permission_mode`, `set_model`, `rewind_files`,
+    `reconnect_mcp_server`, `get_mcp_status`, `get_context_usage` —
+    nothing effort-related). A real change needs a *new* session built
+    with `effort=` set at `ClaudeAgentOptions` construction time, which
+    only `dispatch_execution_attempt`'s *next* dispatch for this task can
+    do (via `resume_session_id`) — this function only does its own half:
+    interrupt the current turn and let the receive loop end on its own.
+    It never reconnects itself.
+
+    `client.interrupt()` itself only sends the interrupt control request
+    and waits for the CLI's acknowledgement of *that request* — confirmed
+    from `ClaudeSDKClient.interrupt()`/`Query.interrupt()`'s source: it's
+    a bare `_send_control_request({"subtype": "interrupt"})`, nothing
+    more. It does not itself wait for the turn to actually end. The turn's
+    own end still arrives later as an ordinary message on the same stream
+    `_receive()` is already consuming — a terminal `ResultMessage` whose
+    `terminal_reason` the SDK documents as `"aborted_streaming"`/
+    `"aborted_tools"` for exactly this case — so `_receive()`'s existing
+    `finally: stop_event.set()` is expected to fire the same way it does
+    for a normal turn, with nothing special-cased here for it. The
+    `asyncio.wait_for` below is this function's own acknowledgement that
+    this is *confirmed* behavior (see `_INTERRUPT_RESULT_TIMEOUT_SECONDS`'s
+    own comment), not something contractually guaranteed: if a real
+    session's CLI process doesn't produce that terminal message promptly,
+    merely giving up on *this function's own wait* would not be enough —
+    `run_execution_attempt`'s top level is blocked on `await receive_task`
+    (the task driving `_receive()`/`client.receive_response()`), which
+    only a `ResultMessage` or an exception out of that generator would
+    ever unblock. So the timeout here also directly cancels `receive_task`
+    itself, which is what actually frees `run_execution_attempt` to reach
+    its `finally: await client.disconnect()` — the one further step,
+    without this, that a real hung interrupt would have blocked forever.
+    `receive_task`'s own cancellation still runs `_receive()`'s `finally:
+    stop_event.set()` on the way out (cancellation propagates through
+    `finally` blocks), so anything else waiting on `stop_event` is
+    released too, consistently.
+
+    Only the first swap request this attempt sees is acted on — once one
+    fires, the interrupt is already in flight and the turn is ending;
+    anything else queued is left for the task's next dispatch to pick up
+    fresh rather than trying to layer a second interrupt onto an
+    already-ending turn.
+
+    `current_model` is the same one-element mutable list `_watch_model_swap`
+    updates after every `set_model()` call, seeded with this attempt's
+    original dispatched model. When the fired request carries no `model`
+    of its own (the common case — a person who only wants to change
+    effort), the triggered record defaults to whatever `current_model`
+    holds at that moment, rather than `None`: this is what makes a model
+    swap that fired earlier in the same attempt survive into the new
+    session an effort swap's own reconnect starts (see
+    `run_execution_attempt`'s own docstring on the two queues racing), and
+    it's also simply the right default when no model swap happened at all
+    — "change effort, leave the model alone" should leave the model alone,
+    not silently fall back to whatever the node type's/task's own default
+    would otherwise have been for a *fresh* dispatch.
+    """
+    while not stop_event.is_set():
+        try:
+            request = effort_swap_queue.get_nowait()
+        except queue.Empty:
+            await asyncio.sleep(_CHAT_POLL_INTERVAL_SECONDS)
+            continue
+        triggered.append(
+            request
+            if request.model is not None
+            else EffortSwapRequest(effort=request.effort, model=current_model[0])
+        )
+        await client.interrupt()
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_INTERRUPT_RESULT_TIMEOUT_SECONDS)
+        except TimeoutError:
+            # The documented behavior this function otherwise relies on
+            # didn't hold for this session — force the receive loop to
+            # end rather than leave run_execution_attempt blocked on
+            # `await receive_task` forever (see this function's own
+            # docstring for why cancelling *this* task's own wait alone
+            # would not have been enough).
+            receive_task.cancel()
+        return
+
+
 async def run_execution_attempt(
     *,
     prompt: str,
@@ -375,6 +555,9 @@ async def run_execution_attempt(
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
     live_messages: queue.Queue[Any] | None = None,
+    model_swap_queue: queue.Queue[str] | None = None,
+    effort_swap_queue: queue.Queue[EffortSwapRequest] | None = None,
+    resume_session_id: str | None = None,
 ) -> ExecutionResult:
     """
     Runs one execution node's prompt through a live Claude Agent SDK
@@ -425,6 +608,45 @@ async def run_execution_attempt(
     pushed anywhere — byte-for-byte what this function did before this
     parameter existed.
 
+    `model_swap_queue`/`effort_swap_queue`, when given, run two more
+    concurrent tasks (`_watch_model_swap`/`_watch_effort_swap`) alongside
+    the receive loop and, when `chat_queue` is given, the chat-forwarding
+    task too — all poll with the same non-blocking `get_nowait()` shape,
+    so any combination of these can run together without one blocking
+    another or the receive loop itself. `model_swap_queue` carries a plain
+    model string, applied in place via `client.set_model()` — the fast
+    path, no interruption. `effort_swap_queue` carries a validated
+    `EffortSwapRequest`; there is no in-place way to change effort, so
+    handling one means calling `client.interrupt()` and letting this
+    receive loop end on its own (see `_watch_effort_swap`'s own docstring
+    for exactly what's confirmed, not assumed, about that), at which point
+    this function returns with `ExecutionResult.swap_requested` set — the
+    signal `dispatch_execution_attempt` uses to record this attempt as
+    `AttemptStatus.INTERRUPTED_FOR_SWAP` instead of PASSED/FAILED, and to
+    arrange for this task's *next* dispatch to resume this exact session
+    with the requested model/effort. If both an effort and a model swap
+    request arrive in close succession, whichever the polling loops happen
+    to observe first wins: a model swap already applied via `set_model()`
+    survives into the new session started by the effort swap's own
+    interrupt-and-reconnect (since that new session is instructed with
+    whatever model `EffortSwapRequest.model` carries — the person's model
+    choice is never silently lost by also changing effort); an effort swap
+    that fires first ends the turn (and this function) before a
+    model-swap request still sitting on `model_swap_queue` is ever drained
+    — left for the task's next (resumed) dispatch to pick up a model_swap_
+    queue request from, same as any other message that loses this race.
+    `None` for both (the default, and what every caller outside the TUI's
+    new modal uses) means neither task is spawned at all — byte-for-byte
+    what this function did before either parameter existed.
+
+    `resume_session_id`, when given, is forwarded to
+    `build_claude_agent_options` as `resume`, landing on the real
+    `ClaudeAgentOptions.resume` field — this is what actually continues a
+    prior session rather than starting a fresh one; see that function's
+    own docstring for the SDK-source confirmation that `resume` is
+    independent of `model`/`effort`. `None` (the default) leaves it unset,
+    same as every dispatch before this parameter existed.
+
     This makes a real call to the Anthropic API via the bundled Claude Code
     CLI subprocess and therefore requires network access and either
     `ANTHROPIC_API_KEY` or an authenticated `claude` CLI session, which is
@@ -445,8 +667,14 @@ async def run_execution_attempt(
         max_turns=max_turns,
         decision_log=decision_log,
         effort=effort,
+        resume=resume_session_id,
     )
     messages: list[Any] = []
+    triggered_swaps: list[EffortSwapRequest] = []
+    # Seeded with this attempt's own dispatched model, updated by
+    # `_watch_model_swap` after every successful `set_model()` call — see
+    # both functions' own docstrings for why `_watch_effort_swap` reads it.
+    current_model: list[str] = [model]
     client = ClaudeSDKClient(options=options)
     await client.connect(prompt)
     try:
@@ -467,22 +695,62 @@ async def run_execution_attempt(
             finally:
                 stop_event.set()
 
-        if chat_queue is None:
-            await _receive()
-        else:
-            receive_task = asyncio.ensure_future(_receive())
-            chat_task = asyncio.ensure_future(
-                _forward_chat_messages(client, chat_queue, stop_event)
+        # One receive task plus zero or more auxiliary tasks (chat
+        # forwarding, model swap, effort swap) — every combination of
+        # queues given spawns exactly the auxiliary tasks it needs,
+        # running concurrently on this one event loop with the receive
+        # loop, never blocking it (every auxiliary task only ever does a
+        # non-blocking queue poll between awaits). With none given at all
+        # (every caller outside the TUI), this is a plain `ClaudeSDKClient`
+        # turn with nothing auxiliary running — the observably-identical
+        # baseline the original chat-only version of this swap was proven
+        # against first.
+        receive_task = asyncio.ensure_future(_receive())
+        auxiliary_tasks: list[asyncio.Task[None]] = []
+        if chat_queue is not None:
+            auxiliary_tasks.append(
+                asyncio.ensure_future(_forward_chat_messages(client, chat_queue, stop_event))
             )
-            try:
-                await receive_task
-            finally:
-                chat_task.cancel()
+        if model_swap_queue is not None:
+            auxiliary_tasks.append(
+                asyncio.ensure_future(
+                    _watch_model_swap(client, model_swap_queue, stop_event, current_model)
+                )
+            )
+        if effort_swap_queue is not None:
+            auxiliary_tasks.append(
+                asyncio.ensure_future(
+                    _watch_effort_swap(
+                        client,
+                        effort_swap_queue,
+                        stop_event,
+                        triggered_swaps,
+                        current_model,
+                        receive_task,
+                    )
+                )
+            )
+        try:
+            await receive_task
+        except asyncio.CancelledError:
+            # Only reachable via _watch_effort_swap's own timeout
+            # fallback deliberately cancelling receive_task when an
+            # interrupted turn never produced a terminal ResultMessage —
+            # see that function's docstring. Swallowed here, not
+            # re-raised: this is this function's own documented recovery
+            # from an undocumented SDK behavior, not an external
+            # cancellation of run_execution_attempt itself that a caller
+            # would need to see.
+            pass
+        finally:
+            for task in auxiliary_tasks:
+                task.cancel()
+            for task in auxiliary_tasks:
                 try:
-                    await chat_task
+                    await task
                 except asyncio.CancelledError:
                     pass
-                except Exception:  # noqa: BLE001, S110 - a chat-forwarding failure
+                except Exception:  # noqa: BLE001, S110 - an auxiliary-task failure
                     # (e.g. the transport already gone) must never mask or
                     # replace the receive loop's own result for this attempt;
                     # see this function's docstring.
@@ -493,4 +761,5 @@ async def run_execution_attempt(
         messages=messages,
         decisions=decision_log,
         session_id=_session_id_from_messages(messages),
+        swap_requested=triggered_swaps[0] if triggered_swaps else None,
     )

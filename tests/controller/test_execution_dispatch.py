@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunOutcome
+from forge.controller.execution_registry import (
+    EffortSwapRequest,
+    ExecutionHandlerRegistry,
+    ExecutionRunOutcome,
+)
 from forge.controller.mechanical import MechanicalRunnerRegistry
 from forge.controller.model_registry import ModelRegistry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
@@ -55,7 +59,7 @@ def _registries():
 
 
 def _writes_a_passing_test_without_committing(
-    model, prompt, profile, worktree_path, *, effort=None
+    model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
 ):
     """
     Simulates an SDK session that wrote real work but didn't commit it
@@ -66,15 +70,17 @@ def _writes_a_passing_test_without_committing(
     return ExecutionRunOutcome(completed=True, summary="wrote a test")
 
 
-def _does_nothing(model, prompt, profile, worktree_path, *, effort=None):
+def _does_nothing(model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None):
     return ExecutionRunOutcome(completed=True, summary="did nothing")
 
 
-def _fails_outright(model, prompt, profile, worktree_path, *, effort=None):
+def _fails_outright(model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None):
     return ExecutionRunOutcome(completed=False, summary="simulated adapter failure")
 
 
-def _writes_a_passing_test_with_session_id(model, prompt, profile, worktree_path, *, effort=None):
+def _writes_a_passing_test_with_session_id(
+    model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+):
     """Same shape as `_writes_a_passing_test_without_committing`, but with a
     real-looking Claude Agent SDK session id attached, the way `run_sdk_node`
     reports one for a real session."""
@@ -268,7 +274,9 @@ def test_mechanical_attempt_never_reaches_an_effort_aware_execution_runner(
     )
     calls: list[tuple[str, object]] = []
 
-    def _capturing_runner(model, prompt, profile, worktree_path, *, effort=None):
+    def _capturing_runner(
+        model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+    ):
         calls.append((model, effort))
         return _writes_a_passing_test_without_committing(
             model, prompt, profile, worktree_path, effort=effort
@@ -419,7 +427,9 @@ def test_custom_dag_task_level_model_and_effort_overrides_reach_the_execution_ru
 
     calls: list[tuple[str, object]] = []
 
-    def _capturing_runner(model, prompt, profile, worktree_path, *, effort=None):
+    def _capturing_runner(
+        model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+    ):
         calls.append((model, effort))
         return _writes_a_passing_test_without_committing(
             model, prompt, profile, worktree_path, effort=effort
@@ -467,7 +477,9 @@ def test_effort_override_replaces_only_the_default_rung_escalation_still_applies
     )
     efforts_seen: list[object] = []
 
-    def _fails_twice_then_passes(model, prompt, profile, worktree_path, *, effort=None):
+    def _fails_twice_then_passes(
+        model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+    ):
         efforts_seen.append(effort)
         if len(efforts_seen) < 3:
             return ExecutionRunOutcome(completed=False, summary="simulated failure")
@@ -501,3 +513,182 @@ def test_effort_override_replaces_only_the_default_rung_escalation_still_applies
 
     assert result.status == RunStatus.COMPLETED_VERIFIED
     assert efforts_seen == ["low", "low", "max"]
+
+
+# -- interrupt-and-resume model/effort swap (post-M9 phase 4) ---------------
+
+
+def test_effort_swap_interrupted_attempt_is_recorded_interrupted_for_swap_and_resumed(
+    store: Store, repo_root: Path
+):
+    """
+    End to end through the real scheduler loop (`run_to_completion`, not a
+    single `dispatch_execution_attempt` call): an `execution_runner` that
+    reports `swap_requested` on its first call must not be scored as a
+    normal pass/fail attempt at all — the attempt is recorded
+    `INTERRUPTED_FOR_SWAP`, with no evidence and no `failure_summary` (it
+    isn't a failure), carrying the session id to resume from and the
+    requested model/effort forward (`pending_resume_model`/
+    `pending_resume_effort`). The *next* dispatch for the same task — which
+    only happens because an INTERRUPTED_FOR_SWAP latest attempt leaves the
+    task ready again, the same way CANCELLED/SUPERSEDED already do — must
+    receive exactly that `resume_session_id`/model/effort, bypassing the
+    normal override-or-default model expression and `select_effort`
+    entirely (the runner's own second call records `effort="max"` with no
+    escalation history at all behind it — two prior FAILED attempts would
+    have been needed to reach "max" through the ordinary policy, and there
+    are zero here).
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+    calls: list[dict[str, object]] = []
+
+    def _interrupts_once_then_passes(
+        model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+    ):
+        calls.append({"model": model, "effort": effort, "resume_session_id": resume_session_id})
+        if len(calls) == 1:
+            return ExecutionRunOutcome(
+                completed=True,
+                summary="interrupted for a swap",
+                session_id="sess-to-resume-xyz",
+                swap_requested=EffortSwapRequest(effort="max", model="claude-opus-5"),
+            )
+        Path(worktree_path, "test_ok.py").write_text("def test_ok():\n    assert True\n")
+        return ExecutionRunOutcome(completed=True, summary="wrote a test")
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=ModelRegistry([]),
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_interrupts_once_then_passes,
+        repo_root=repo_root,
+    )
+
+    from tests.conftest import make_graph, make_request, make_task
+
+    criterion = AcceptanceCriterion(
+        id="c1", description="implement_exec's own work", verification_method="automated_test"
+    )
+    req = make_request(acceptance_criteria=[criterion])
+    t1 = make_task(
+        "t1",
+        node_type="implement_exec",
+        node_kind=NodeKind.EXECUTION,
+        permission_profile="code_edit_default",
+        acceptance_criterion_ids=["c1"],
+    )
+    graph = make_graph([t1])
+
+    run = start_run(req, graph, store)
+    result = run_to_completion(run.id, store, deps)
+
+    assert result.status == RunStatus.COMPLETED_VERIFIED
+    assert len(calls) == 2
+
+    # First dispatch: nothing to resume yet, ordinary default model/effort.
+    assert calls[0]["resume_session_id"] is None
+
+    # Second dispatch: the swap's own requested model/effort, and the
+    # exact session to resume from — never select_model's/select_effort's
+    # own escalation policy (which would need 2 prior FAILED attempts to
+    # ever produce "max", and there are none here).
+    assert calls[1]["resume_session_id"] == "sess-to-resume-xyz"
+    assert calls[1]["model"] == "claude-opus-5"
+    assert calls[1]["effort"] == "max"
+
+    attempts = sorted(store.load_attempts(run.id), key=lambda a: a.attempt_number)
+    assert len(attempts) == 2
+    interrupted, resumed = attempts
+
+    assert interrupted.status == AttemptStatus.INTERRUPTED_FOR_SWAP
+    assert interrupted.failure_summary is None
+    assert interrupted.sdk_session_id == "sess-to-resume-xyz"
+    assert interrupted.pending_resume_model == "claude-opus-5"
+    assert interrupted.pending_resume_effort == "max"
+    # Not scored as a pass/fail attempt: no evidence produced for it at all.
+    assert not [e for e in store.load_evidence(run.id) if e.attempt_id == interrupted.id]
+
+    assert resumed.status == AttemptStatus.PASSED
+    assert resumed.model_used == "claude-opus-5"
+    # The interrupted attempt is never miscounted as a failure by the
+    # escalation policy — calls[1]["effort"] == "max" above came from the
+    # swap's own override, not from select_effort's 2-prior-FAILED-
+    # attempts escalation rule (there are zero FAILED attempts here at
+    # all); see tests/controller/test_model_registry.py::TestSelectEffort
+    # ::test_interrupted_for_swap_attempts_are_never_counted_as_failures
+    # for the same claim proven directly against select_effort/
+    # _prior_failures.
+
+
+def test_interrupted_for_swap_attempt_does_not_trip_unrecoverable_failure_detection(
+    store: Store, repo_root: Path
+):
+    """
+    `_has_unrecoverable_failure` (the check that sends a run straight to
+    FAILED_EXHAUSTED) only ever looks at a required task's *latest*
+    attempt status — if that status is INTERRUPTED_FOR_SWAP rather than
+    FAILED, the run must stay ACTIVE and keep making progress, not be
+    declared failed. Uses an execution_runner that only ever reports a
+    swap interruption (never a real pass/fail), driven for a bounded
+    number of ticks directly rather than through run_to_completion (which
+    would loop forever against a runner that never actually finishes the
+    task) — this isolates exactly the one check this test is about.
+    """
+    node_registry, permission_registry, mechanical_registry, execution_handler_registry = (
+        _registries()
+    )
+
+    def _always_interrupts(
+        model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
+    ):
+        return ExecutionRunOutcome(
+            completed=True,
+            summary="interrupted for a swap",
+            session_id="sess-again",
+            swap_requested=EffortSwapRequest(effort="max"),
+        )
+
+    deps = ControllerDependencies(
+        mechanical_registry=mechanical_registry,
+        node_registry=node_registry,
+        permission_registry=permission_registry,
+        model_registry=ModelRegistry([]),
+        execution_handler_registry=execution_handler_registry,
+        execution_runner=_always_interrupts,
+        repo_root=repo_root,
+    )
+
+    from forge.controller.scheduler import controller_tick
+    from tests.conftest import make_graph, make_request, make_task
+
+    # A required acceptance criterion tied to t1 so the run's gates are
+    # never vacuously "met" regardless of t1's status — without this, a
+    # request with no acceptance criteria at all would make the run
+    # COMPLETED_VERIFIED after the very first tick (gates are trivially
+    # met when nothing requires evidence), defeating the point of driving
+    # several ticks here.
+    criterion = AcceptanceCriterion(
+        id="c1", description="implement_exec's own work", verification_method="automated_test"
+    )
+    req = make_request(acceptance_criteria=[criterion])
+    t1 = make_task(
+        "t1",
+        node_type="implement_exec",
+        node_kind=NodeKind.EXECUTION,
+        permission_profile="code_edit_default",
+        acceptance_criterion_ids=["c1"],
+    )
+    graph = make_graph([t1])
+
+    run = start_run(req, graph, store)
+    for _ in range(3):
+        run = controller_tick(run.id, store, deps)
+        assert run.status == RunStatus.ACTIVE
+
+    attempts = store.load_attempts(run.id)
+    assert len(attempts) == 3
+    assert all(a.status == AttemptStatus.INTERRUPTED_FOR_SWAP for a in attempts)

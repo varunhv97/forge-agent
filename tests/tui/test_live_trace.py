@@ -37,6 +37,9 @@ def _live_trace_emitting_runner(
     chat_queue: queue.Queue[str] | None = None,
     effort: EffortLevel | None = None,
     live_messages: queue.Queue[object] | None = None,
+    model_swap_queue: queue.Queue[str] | None = None,
+    effort_swap_queue: queue.Queue[object] | None = None,
+    resume_session_id: str | None = None,
 ) -> ExecutionRunOutcome:
     """
     Stands in for `run_sdk_node` for the one EXECUTION task

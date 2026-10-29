@@ -61,7 +61,11 @@ from typing import Any
 from forge.adapters.deploy.vercel_adapter import VercelDeployAdapter
 from forge.adapters.execution.sdk_node_runner import run_sdk_node
 from forge.controller import db
-from forge.controller.execution_registry import ExecutionHandlerRegistry, ExecutionRunOutcome
+from forge.controller.execution_registry import (
+    EffortSwapRequest,
+    ExecutionHandlerRegistry,
+    ExecutionRunOutcome,
+)
 from forge.controller.mechanical import MechanicalRunnerRegistry
 from forge.controller.model_registry import build_default_model_registry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
@@ -101,6 +105,20 @@ class RunWorker:
         # Same lifecycle, opposite direction — see this module's own
         # docstring for the unbounded-queue/backpressure reasoning.
         self.live_messages: queue.Queue[Any] | None = None
+        # Same lifecycle again (post-M9 phase 4, in-place model/effort
+        # swap): non-`None` for exactly the duration of one EXECUTION
+        # attempt, set/cleared by `_run_sdk_node_with_chat` in the same
+        # `finally` as the two above. `model_swap_queue` carries a plain
+        # model string for the fast, no-interruption path
+        # (`ClaudeSDKClient.set_model`); `effort_swap_queue` carries a
+        # validated `EffortSwapRequest` for the interrupt-and-reconnect
+        # path (there is no in-place way to change effort). Neither is
+        # ever written to directly by the TUI — only
+        # `forge.controller.decisions.request_execution_swap`, via
+        # `ForgeApp.request_execution_swap`, pushes onto either, after
+        # validating the request against the real `ModelRegistry`.
+        self.model_swap_queue: queue.Queue[str] | None = None
+        self.effort_swap_queue: queue.Queue[EffortSwapRequest] | None = None
 
     def start(self) -> None:
         if self._thread is not None:
@@ -120,6 +138,7 @@ class RunWorker:
         worktree_path: str,
         *,
         effort: EffortLevel | None = None,
+        resume_session_id: str | None = None,
     ) -> ExecutionRunOutcome:
         """
         Wraps `run_sdk_node` so this `RunWorker` can expose, for exactly
@@ -138,18 +157,37 @@ class RunWorker:
         set) because this method is what's wired in as `ControllerDependencies.
         execution_runner`, which the scheduler now calls with `effort=`
         on every EXECUTION dispatch — this method has no logic of its own
-        for it, just forwards it straight to `run_sdk_node`.
+        for it, just forwards it straight to `run_sdk_node`. `resume_session_id`
+        is the same shape again (post-M9 phase 4): the scheduler passes it
+        when this dispatch is the one honoring a prior INTERRUPTED_FOR_SWAP
+        attempt's resume request; this method just forwards it too.
 
-        `live_messages` gets the exact same fresh-queue/set/finally-clear
-        treatment as `chat_queue`, literally copied — this module's own
-        docstring already worked out that pattern for one cross-thread
-        channel, and nothing about adding a second one (opposite
-        direction) changes it.
+        `live_messages`/`model_swap_queue`/`effort_swap_queue` each get the
+        exact same fresh-queue/set/finally-clear treatment as `chat_queue`,
+        literally copied — this module's own docstring already worked out
+        that pattern for one cross-thread channel, and nothing about
+        adding three more (two more directions of the same "a queue the
+        TUI's main thread pushes a validated request onto" shape
+        `chat_queue` already is, one more of `live_messages`'s "the
+        background thread pushes data out" shape) changes it. A request
+        still sitting on `model_swap_queue`/`effort_swap_queue` the instant
+        this attempt ends normally (not via a swap at all) is handled the
+        same way a stale `chat_queue` message already is: the queue object
+        these variables pointed at is simply never read again after
+        they're cleared back to `None` below, so a `.put()` racing the end
+        of this method either lands on a queue nothing drains any more or
+        is rejected outright by `ForgeApp.request_execution_swap` once it
+        observes the attribute back at `None` — never delivered into a
+        stale or future attempt's session.
         """
         chat_queue: queue.Queue[str] = queue.Queue()
         live_messages: queue.Queue[Any] = queue.Queue()
+        model_swap_queue: queue.Queue[str] = queue.Queue()
+        effort_swap_queue: queue.Queue[EffortSwapRequest] = queue.Queue()
         self.active_chat_queue = chat_queue
         self.live_messages = live_messages
+        self.model_swap_queue = model_swap_queue
+        self.effort_swap_queue = effort_swap_queue
         try:
             return run_sdk_node(
                 model,
@@ -159,10 +197,15 @@ class RunWorker:
                 chat_queue=chat_queue,
                 effort=effort,
                 live_messages=live_messages,
+                model_swap_queue=model_swap_queue,
+                effort_swap_queue=effort_swap_queue,
+                resume_session_id=resume_session_id,
             )
         finally:
             self.active_chat_queue = None
             self.live_messages = None
+            self.model_swap_queue = None
+            self.effort_swap_queue = None
 
     def _run(self) -> None:
         conn = db.connect(self.db_path)

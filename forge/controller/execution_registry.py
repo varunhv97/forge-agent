@@ -12,6 +12,33 @@ from forge.models.permissions import PermissionProfile
 from forge.models.request import Request
 
 
+@dataclass(frozen=True)
+class EffortSwapRequest:
+    """
+    A validated, user-requested effort (and optionally model) change for a
+    currently-live EXECUTION attempt. Built only by
+    `forge.controller.decisions.request_execution_swap` (the one validated
+    path — never constructed from unvalidated UI input directly) and then:
+
+    - put onto `RunWorker.effort_swap_queue` (`forge/tui/runner.py`) by that
+      function, to reach the running attempt's own interrupt-watching task
+      (`sdk_execution_adapter._watch_effort_swap`);
+    - carried back out on `ExecutionRunOutcome.swap_requested` once that
+      attempt has been interrupted, for `dispatch_execution_attempt` to
+      persist onto the interrupted `Attempt`'s own `pending_resume_model`/
+      `pending_resume_effort` fields, which its *next* dispatch reads back.
+
+    `effort` is required (this is the one thing that forces the
+    interrupt-and-reconnect path at all — a model-only change never
+    constructs one of these, it goes straight onto `model_swap_queue`
+    instead, see `request_execution_swap`); `model`, when also given,
+    rides along on the same reconnect rather than costing a second one.
+    """
+
+    effort: EffortLevel
+    model: str | None = None
+
+
 @dataclass
 class ExecutionRunOutcome:
     """
@@ -39,22 +66,41 @@ class ExecutionRunOutcome:
     completed: bool
     summary: str = ""
     session_id: str | None = None
+    # Set when this attempt was interrupted because a person asked to
+    # change its effort (optionally bundled with a model change) in place
+    # — see `EffortSwapRequest`'s own docstring for the full round trip.
+    # `completed` is still `True` in this case (the SDK call itself didn't
+    # error; the session was cut short on purpose, not by a procedural
+    # failure) — `dispatch_execution_attempt` checks `swap_requested`
+    # *before* `completed` for exactly this reason, so this outcome is
+    # never scored as a normal pass/fail attempt. `session_id` (above) is
+    # still populated as usual in this case too — it's the session to
+    # resume from, read off the same terminal `ResultMessage` an ordinary
+    # turn would have produced (confirmed: an interrupted turn still ends
+    # with one, see `sdk_execution_adapter._watch_effort_swap`'s
+    # docstring). `None` for every ordinary pass/fail outcome, and always
+    # `None` for a MECHANICAL runner or a Codex CLI attempt.
+    swap_requested: EffortSwapRequest | None = None
 
 
 class ExecutionRunner(Protocol):
     """
     (model, prompt, permission_profile, worktree_path) -> ExecutionRunOutcome,
-    plus a keyword-only `effort` the dispatcher passes on every call (see
-    `forge.controller.model_registry.select_effort`). Declared as a
-    Protocol rather than a plain `Callable[[...], ...]` type alias
-    specifically so this keyword-only parameter can be expressed at all —
-    `Callable[[...], ...]` can only describe positional parameters.
-    `effort` is `None` whenever a node type configures no
-    default_effort/escalation_effort, which is the common case for most
-    node types today; every concrete runner (`run_sdk_node`, `RunWorker.
-    _run_sdk_node_with_chat`) accepts it and simply does nothing SDK-side
-    when it's `None`, same as `chat_queue` already does for "no chat this
-    attempt."
+    plus two keyword-only parameters the dispatcher passes on every call:
+    `effort` (see `forge.controller.model_registry.select_effort`) and
+    `resume_session_id` (the real Claude Agent SDK session id to resume
+    from, when this dispatch is the one honoring a prior
+    INTERRUPTED_FOR_SWAP attempt's pending_resume_model/
+    pending_resume_effort — see `forge.controller.scheduler.
+    dispatch_execution_attempt`). Declared as a Protocol rather than a
+    plain `Callable[[...], ...]` type alias specifically so these
+    keyword-only parameters can be expressed at all — `Callable[[...],
+    ...]` can only describe positional parameters. Both are `None` in the
+    overwhelmingly common case (no effort configured; a fresh, non-resumed
+    dispatch); every concrete runner (`run_sdk_node`, `RunWorker.
+    _run_sdk_node_with_chat`) accepts both and simply does nothing SDK-side
+    when they're `None`, same as `chat_queue` already does for "no chat
+    this attempt."
     """
 
     def __call__(
@@ -65,6 +111,7 @@ class ExecutionRunner(Protocol):
         worktree_path: str,
         *,
         effort: EffortLevel | None = None,
+        resume_session_id: str | None = None,
     ) -> ExecutionRunOutcome: ...
 
 

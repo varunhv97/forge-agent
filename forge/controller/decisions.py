@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import queue
 from datetime import UTC, datetime
 from typing import Protocol
 
 from forge.controller.evidence_index import EvidenceIndex
+from forge.controller.execution_registry import EffortSwapRequest
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.store import Store
 from forge.controller.validator import compile_and_validate, propagate_invalidation
 from forge.models.attempt import Attempt, AttemptStatus
+from forge.models.common import EffortLevel
 from forge.models.decision import DecisionAction, DecisionProposal, GraphRevisionProposal
 from forge.models.graph import GraphVersion, TaskSpec
 from forge.models.request import Request
@@ -53,6 +56,92 @@ class DispatchRetryFn(Protocol):
         retries_from_attempt_id: str | None,
         escalated_from_attempt_id: str | None,
     ) -> Attempt: ...
+
+
+class InvalidSwapRequestError(Exception):
+    """
+    Raised by `request_execution_swap` when a person's live model/effort
+    swap request can't be honored: neither a model nor an effort change
+    was actually given, the chosen model isn't registered or isn't
+    eligible for this task's node type (the same
+    `ModelEligibilityChecker.validate_eligible` check `apply_decision`
+    already runs for a decision's own `escalate_to_model`), or there's no
+    live attempt to swap at all (the queue the request needs doesn't
+    exist right now). The TUI surfaces this as a visible notify, never a
+    silent no-op.
+    """
+
+
+def request_execution_swap(
+    *,
+    model_registry: ModelEligibilityChecker,
+    node_type_name: str,
+    model_swap_queue: queue.Queue[str] | None,
+    effort_swap_queue: queue.Queue[EffortSwapRequest] | None,
+    model: str | None = None,
+    effort: EffortLevel | None = None,
+) -> None:
+    """
+    The one validated path from "a person asked to change a currently-live
+    EXECUTION attempt's model/effort" to the actual cross-thread queue
+    push(es) that reach it — mirrors `apply_decision`'s own rule that a
+    proposal is never trusted to become a real effect until this layer has
+    checked it: the TUI (`forge/tui/app.py::ForgeApp.request_execution_swap`,
+    called from `forge/tui/screens.py`'s swap modal) never pokes a
+    `RunWorker`'s `model_swap_queue`/`effort_swap_queue` directly with
+    unvalidated input — this is the only function that does.
+
+    A requested `model` is checked against `model_registry.validate_eligible`
+    exactly like `apply_decision` already does for a decision's own
+    `escalate_to_model` — unknown or ineligible for `node_type_name` raises
+    whatever that check raises (`UnknownModelError`/`ModelNotEligibleError`
+    from `forge.controller.model_registry`, not caught or wrapped here).
+    `effort` needs no equivalent registry check — same reasoning as every
+    other effort value in this codebase: it's already constrained to a
+    real `EffortLevel` by its own `Literal` type.
+
+    Routing follows the two genuinely different mechanisms this feature
+    is built on: a model-only request (no `effort`) goes through the fast,
+    no-interruption path (`model_swap_queue`, just the model string —
+    `ClaudeSDKClient.set_model` applies it live, no reconnect). Any request
+    that includes an `effort` change (with or without a `model` alongside
+    it) goes through the interrupt-and-reconnect path instead
+    (`effort_swap_queue`, one bundled `EffortSwapRequest`) — there is no
+    in-place way to change effort, so a simultaneous model change rides
+    along on the same reconnect rather than costing the attempt a second
+    one.
+
+    Raises `InvalidSwapRequestError` when neither `model` nor `effort` is
+    given (nothing to do), or when the queue the request actually needs is
+    `None` (no live attempt to swap right now — the caller is expected to
+    have already checked this the same way the chat input already gates
+    on `active_chat_queue_for`, but this is enforced here too rather than
+    trusted).
+    """
+    if model is None and effort is None:
+        raise InvalidSwapRequestError("neither a model nor an effort change was requested")
+    if model is not None:
+        model_registry.validate_eligible(model, node_type_name)
+
+    if effort is not None:
+        if effort_swap_queue is None:
+            raise InvalidSwapRequestError("no live attempt to swap effort for right now")
+        effort_swap_queue.put(EffortSwapRequest(effort=effort, model=model))
+        return
+
+    if model_swap_queue is None:
+        raise InvalidSwapRequestError("no live attempt to swap model for right now")
+    if model is None:
+        # Unreachable in practice: the first check above already raised
+        # unless at least one of model/effort was given, and the `effort
+        # is not None` branch above already returned — so reaching here
+        # means effort is None, which means model must be the one that
+        # was given. A real `raise` (not `assert`, which Python strips
+        # under `-O`) both keeps this safe at runtime regardless and lets
+        # mypy narrow `model` from `str | None` to `str` for the `put()`
+        # call below, which needs a real `str` for `queue.Queue[str]`.
+        raise InvalidSwapRequestError("neither a model nor an effort change was requested")
+    model_swap_queue.put(model)
 
 
 def _now() -> datetime:

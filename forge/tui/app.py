@@ -30,11 +30,13 @@ from textual.binding import Binding, BindingType
 
 from forge import project
 from forge.controller import db
+from forge.controller.decisions import request_execution_swap
 from forge.controller.model_registry import build_default_model_registry
 from forge.controller.node_registry import NodeTypeRegistry, PermissionProfileRegistry
 from forge.controller.scheduler import start_run
 from forge.controller.store import NotFoundError, Store
 from forge.controller.validator import compile_and_validate
+from forge.models.common import EffortLevel
 from forge.models.permissions import Budgets
 from forge.models.run import RunStatus
 from forge.modes.custom_dag import (
@@ -283,6 +285,40 @@ class ForgeApp(App[None]):
         if worker is None:
             return None
         return worker.live_messages
+
+    def request_execution_swap(
+        self,
+        run_id: str,
+        node_type_name: str,
+        *,
+        model: str | None,
+        effort: EffortLevel | None,
+    ) -> None:
+        """
+        The one call `LiveRunScreen`'s model/effort swap modal makes —
+        it never pokes a `RunWorker`'s `model_swap_queue`/
+        `effort_swap_queue` directly with unvalidated input. Delegates to
+        `forge.controller.decisions.request_execution_swap`, the one
+        validated path (checks `model`, when given, against
+        `self.model_registry` exactly like a decision's own
+        `escalate_to_model` already is in `apply_decision`), passing
+        along whichever of the live `RunWorker`'s two queues currently
+        exist (`None` for both when there's no `RunWorker` for this run at
+        all, same as `active_chat_queue_for`/`live_messages_for` already
+        handle that case — `request_execution_swap` itself turns a `None`
+        queue the request actually needs into a raised
+        `InvalidSwapRequestError`, surfaced to the caller to notify on,
+        never silently swallowed here).
+        """
+        worker = self._live_workers.get(run_id)
+        request_execution_swap(
+            model_registry=self.model_registry,
+            node_type_name=node_type_name,
+            model_swap_queue=worker.model_swap_queue if worker is not None else None,
+            effort_swap_queue=worker.effort_swap_queue if worker is not None else None,
+            model=model,
+            effort=effort,
+        )
 
 
 def run_tui(db_path_override: Path | None = None) -> int:

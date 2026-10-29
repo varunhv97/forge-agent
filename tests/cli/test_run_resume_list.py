@@ -80,7 +80,7 @@ def _write_dag(repo_root: Path, name: str = "implement-and-verify") -> None:
 
 
 def _fake_execution_runner(
-    model, prompt, profile, worktree_path, *, effort=None
+    model, prompt, profile, worktree_path, *, effort=None, resume_session_id=None
 ) -> ExecutionRunOutcome:
     """
     Stands in for a real `claude` CLI session the same way
